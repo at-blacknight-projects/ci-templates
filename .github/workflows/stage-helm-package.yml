@@ -50,8 +50,14 @@ on:
         type: boolean
         default: true
     secrets:
+      app-id:
+        description: GitHub App installed on index-repo with contents write. With app-private-key, pushes to the index use a short-lived app token instead of index-token.
+        required: false
+      app-private-key:
+        description: Private key of that app.
+        required: false
       index-token:
-        description: Token that can push to index-repo.
+        description: Token that can push to index-repo. Only needed without an app.
         required: false
       registry-username:
         description: OCI registry user. Empty uses the workflow actor with GITHUB_TOKEN (ghcr.io).
@@ -144,13 +150,40 @@ jobs:
             fi
           done
 
+      - name: Check for a GitHub App
+        id: app
+        if: inputs.publish && inputs.index-repo != ''
+        env:
+          APP_ID: ${{ secrets.app-id }}
+          APP_KEY: ${{ secrets.app-private-key }}
+          INDEX_REPO: ${{ inputs.index-repo }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "owner=${INDEX_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${INDEX_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      # Scoped to the index repo alone, and expires within the hour: no stored PAT.
+      - name: Create GitHub App token for the index
+        id: app-token
+        if: steps.app.outputs.enabled == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ steps.app.outputs.owner }}
+          repositories: ${{ steps.app.outputs.name }}
+
       - name: Check out the chart index
         if: inputs.publish && inputs.index-repo != ''
         uses: actions/checkout@v7
         with:
           repository: ${{ inputs.index-repo }}
           ref: ${{ inputs.index-branch }}
-          token: ${{ secrets.index-token }}
+          token: ${{ steps.app-token.outputs.token || secrets.index-token }}
           path: chart-index
 
       - name: Publish to the chart index
@@ -160,13 +193,22 @@ jobs:
           INDEX_REPO: ${{ inputs.index-repo }}
           INDEX_URL: ${{ inputs.index-url }}
           BRANCH: ${{ inputs.index-branch }}
+          SLUG: ${{ steps.app-token.outputs.app-slug }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           url="${INDEX_URL:-https://${INDEX_REPO%%/*}.github.io/${INDEX_REPO#*/}/}"
           cp ../dist/*.tgz .
           [ -s index.yaml ] || printf 'apiVersion: v1\nentries: {}\n' > index.yaml
           helm repo index . --url "$url" --merge index.yaml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Author as the identity that pushes: the app's bot user, else github-actions[bot].
+          if [ -n "$SLUG" ]; then
+            bot="${SLUG}[bot]"
+            id=$(GH_TOKEN="$APP_TOKEN" gh api "users/${SLUG}%5Bbot%5D" --jq .id)
+          else
+            bot="github-actions[bot]" ; id=41898282
+          fi
+          git config user.name "$bot"
+          git config user.email "${id}+${bot}@users.noreply.github.com"
           git add ./*.tgz index.yaml
           if git diff --cached --quiet; then echo "Nothing new to publish"; exit 0; fi
           git commit -m "Publish $(cd ../dist && printf '%s ' ./*.tgz | sed 's|\./||g')"
