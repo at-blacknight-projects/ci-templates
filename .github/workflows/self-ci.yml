@@ -28,8 +28,6 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color
       - name: Check every action ref resolves
         if: ${{ !cancelled() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: bash .github/scripts/check-action-refs.sh
 
   checks:

@@ -10,20 +10,19 @@ while read -r ref; do
   repo=$(cut -d@ -f1 <<< "$ref" | cut -d/ -f1-2)
   ver=${ref##*@}
   [ "$repo" = "${GITHUB_REPOSITORY:-}" ] && continue
+  # Anonymous lookups only: some orgs put an IP allow list on token-authenticated API
+  # access, which refuses runners even for public repos (aquasecurity does).
+  found=0 ; detail=""
   if [[ "$ver" =~ ^[0-9a-f]{40}$ ]]; then
-    checks=("repos/$repo/git/commits/$ver")
-  else
-    checks=("repos/$repo/git/ref/tags/$ver" "repos/$repo/git/ref/heads/$ver")
+    code=$(curl "https://api.github.com/repos/$repo/commits/$ver" -s -o /dev/null -w '%{http_code}')
+    [ "$code" = 200 ] && found=1 || detail=" (commit lookup: HTTP $code)"
+  elif git ls-remote --exit-code "https://github.com/$repo" "refs/tags/$ver" "refs/heads/$ver" > /dev/null 2>&1; then
+    found=1
   fi
-  found=0 ; errors=""
-  for path in "${checks[@]}"; do
-    if out=$(gh api "$path" 2>&1); then found=1; break; fi
-    errors+=" [$path: $(head -c 200 <<< "$out" | tr '\n' ' ')]"
-  done
   if [ "$found" = 1 ]; then
     echo "ok       $ref"
   else
-    echo "::error::$ref does not resolve to a tag, branch or commit.$errors"
+    echo "::error::$ref does not resolve to a tag, branch or commit$detail"
     missing=1
   fi
 done < <(grep -rhoE 'uses: *[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[A-Za-z0-9_.-]+' "$dir" | sed -E 's/uses: *//' | sort -u)
