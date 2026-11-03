@@ -1,0 +1,39 @@
+name: Self Renovate
+
+# Runs the shared renovate.yml for at-blacknight-projects as at-b-bot. Only repos listed
+# here are processed: add one once its renovate.json extends the shared preset, so
+# Renovate never acts on an old or upstream config.
+#
+# Every 4 hours: the preset only opens routine PRs before 6am on Mondays (UTC), but
+# vulnerability fixes, automerges and rebases happen on any run.
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "off for a real run, or lookup / full to only report."
+        type: choice
+        options: ["off", lookup, full]
+        default: "off"
+      log-level:
+        description: Log level.
+        type: choice
+        options: [info, debug]
+        default: info
+
+permissions:
+  contents: read
+
+jobs:
+  renovate:
+    uses: ./.github/workflows/renovate.yml
+    with:
+      repositories: |
+        at-blacknight-projects/ci-templates
+      dry-run: ${{ inputs.dry-run != 'off' && inputs.dry-run || '' }}
+      log-level: ${{ inputs.log-level || 'info' }}
+    secrets:
+      app-id: ${{ secrets.RENOVATE_APP_ID }}
+      app-private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}

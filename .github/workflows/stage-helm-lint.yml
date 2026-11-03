@@ -16,6 +16,7 @@ on:
       helm-version:
         description: Helm version.
         type: string
+        # renovate: datasource=github-releases depName=helm/helm
         default: v3.22.1
       kubeconform:
         description: Validate rendered manifests with kubeconform.
@@ -28,6 +29,7 @@ on:
       kubeconform-version:
         description: kubeconform version.
         type: string
+        # renovate: datasource=github-releases depName=yannh/kubeconform
         default: v0.8.0
 
 permissions:

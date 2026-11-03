@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["local>at-blacknight-projects/ci-templates"],
+  "packageRules": [
+    {
+      "description": "Helm 4 changes chart and install behaviour; move the stages to it deliberately, not as a routine update.",
+      "matchDepNames": ["helm/helm"],
+      "allowedVersions": "<4"
+    }
+  ]
+}

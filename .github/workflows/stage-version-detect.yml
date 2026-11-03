@@ -110,12 +110,14 @@ jobs:
 
       - name: Install semantic-release
         run: |
+          # renovate: datasource=npm depName=@at-blacknight/semantic-release-ci-output
+          ci_output=0.1.0
           npm install -g semantic-release@25 \
             @semantic-release/changelog@6 \
             @semantic-release/git@11 \
             @semantic-release/github@12 \
             conventional-changelog-conventionalcommits@10 \
-            @at-blacknight/semantic-release-ci-output@0.1.0
+            "@at-blacknight/semantic-release-ci-output@${ci_output}"
 
       - name: Determine changelog filename
         id: changelog-file

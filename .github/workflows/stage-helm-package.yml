@@ -27,6 +27,7 @@ on:
       helm-version:
         description: Helm version.
         type: string
+        # renovate: datasource=github-releases depName=helm/helm
         default: v3.22.1
       oci-registry:
         description: OCI destination, e.g. oci://ghcr.io/example/charts. Empty means oci://ghcr.io/<owner>/charts; "none" skips OCI.

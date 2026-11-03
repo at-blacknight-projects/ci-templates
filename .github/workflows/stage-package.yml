@@ -189,7 +189,9 @@ jobs:
           DESCRIPTION: ${{ inputs.windows-description || inputs.name }}
           URL: ${{ inputs.windows-url || format('{0}/{1}', github.server_url, github.repository) }}
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" https://github.com/ebourg/jsign/releases/download/7.6/jsign-7.6.jar
+          # renovate: datasource=github-releases depName=ebourg/jsign
+          jsign=7.6
+          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" "https://github.com/ebourg/jsign/releases/download/${jsign}/jsign-${jsign}.jar"
           # Passwords and tokens go to jsign as env:NAME, never on the command line.
           args=(--tsaurl "$TSA" --tsmode RFC3161 --name "$DESCRIPTION" --url "$URL")
           case "$PROVIDER" in
@@ -222,6 +224,7 @@ jobs:
       - name: Install rcodesign
         if: steps.plan.outputs.mac == 'true'
         run: |
+          # renovate: datasource=github-releases depName=indygreg/apple-platform-rs extractVersion=^apple-codesign/(?<version>.+)$
           v=0.29.0
           curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${v}/apple-codesign-${v}-x86_64-unknown-linux-musl.tar.gz" \
             | tar -xz -C "$RUNNER_TEMP" --strip-components=1 "apple-codesign-${v}-x86_64-unknown-linux-musl/rcodesign"

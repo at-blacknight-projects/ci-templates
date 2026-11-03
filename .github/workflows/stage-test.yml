@@ -90,15 +90,24 @@ jobs:
           IN_COVERAGE: ${{ inputs.coverage-file }}
         run: |
           version="" ; version_file="" ; install="" ; lint="" ; audit="" ; test="" ; coverage="coverage.xml"
+
+          # Tool versions the presets pin. The annotations let Renovate keep them current.
+          # renovate: datasource=go depName=github.com/golangci/golangci-lint/v2
+          golangci_lint=v2.15.0
+          # renovate: datasource=go depName=github.com/boumenot/gocover-cobertura
+          gocover_cobertura=v1.5.0
+          # renovate: datasource=npm depName=c8
+          c8=10
+
           # Commands are single-quoted on purpose: they expand when they run, not here.
           # shellcheck disable=SC2016
           case "$TOOLCHAIN" in
             go)
               version_file="go.mod"
               install='go mod download && go mod verify'
-              lint='go vet ./... && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run'
+              lint="go vet ./... && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${golangci_lint} run"
               audit='go run golang.org/x/vuln/cmd/govulncheck@latest ./...'
-              test='go test -race -covermode=atomic -coverprofile=coverage.out ./... && go run github.com/boumenot/gocover-cobertura@v1.5.0 < coverage.out > coverage.xml'
+              test="go test -race -covermode=atomic -coverprofile=coverage.out ./... && go run github.com/boumenot/gocover-cobertura@${gocover_cobertura} < coverage.out > coverage.xml"
               ;;
             rust)
               if [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then version=""; else version="stable"; fi
@@ -119,7 +128,7 @@ jobs:
               install='npm ci'
               lint='npm run lint --if-present'
               audit='npm audit --audit-level=high'
-              test='npx --yes c8@10 --reporter=cobertura --reporter=text --report-dir=. npm test'
+              test="npx --yes c8@${c8} --reporter=cobertura --reporter=text --report-dir=. npm test"
               coverage="cobertura-coverage.xml"
               ;;
             dotnet)
