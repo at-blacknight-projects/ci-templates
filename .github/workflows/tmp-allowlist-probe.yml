@@ -1,0 +1,19 @@
+name: tmp allowlist probe
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe aquasecurity access from a runner
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          u=https://github.com/aquasecurity/trivy-action
+          echo "anon git:  $(git ls-remote --tags $u 'v0.36.0' >/dev/null 2>&1 && echo ok || echo FAIL)"
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          echo "token git: $(git -c http.extraheader="AUTHORIZATION: basic $auth" ls-remote --tags $u 'v0.36.0' 2>&1 | head -c 200 | tr '\n' ' ')"
+          echo "token git (insteadOf): $(git -c url."https://x-access-token:${TOKEN}@github.com/".insteadOf=https://github.com/ ls-remote --tags $u 'v0.36.0' 2>&1 | head -c 200 | tr '\n' ' ')"
+          echo "anon api:  $(curl https://api.github.com/repos/aquasecurity/trivy-action/tags -s -o /dev/null -w '%{http_code}')"
+          echo "token api: $(curl https://api.github.com/repos/aquasecurity/trivy-action/tags -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN")"
