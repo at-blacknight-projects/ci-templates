@@ -98,6 +98,8 @@ jobs:
           gocover_cobertura=v1.5.0
           # renovate: datasource=npm depName=c8
           c8=10
+          # renovate: datasource=go depName=golang.org/x/vuln
+          govulncheck=v1.9.0
 
           # Commands are single-quoted on purpose: they expand when they run, not here.
           # shellcheck disable=SC2016
@@ -106,7 +108,42 @@ jobs:
               version_file="go.mod"
               install='go mod download && go mod verify'
               lint="go vet ./... && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${golangci_lint} run"
-              audit='go run golang.org/x/vuln/cmd/govulncheck@latest ./...'
+              # govulncheck has no way to accept a finding, so the audit reads its JSON:
+              # it fails on every REACHABLE vulnerability (a call trace into the
+              # vulnerable code) unless .govulncheck-ignore lists it WITH a reason, prints
+              # the accepted ones every run, and warns about entries no longer reported.
+              audit=$(sed "s/@GOVULNCHECK@/${govulncheck}/" <<'AUDIT'
+          ignore=.govulncheck-ignore
+          report="${RUNNER_TEMP:-/tmp}/govulncheck.json"
+          go run golang.org/x/vuln/cmd/govulncheck@@GOVULNCHECK@ -format json ./... > "$report"
+          found=$(jq -r 'select(.finding) | .finding | select(.trace[0].function != null) | .osv' "$report" | sort -u)
+          ignored=""
+          if [ -f "$ignore" ]; then
+            bad=$(grep -nvE '^[[:space:]]*(#|$)|^[[:space:]]*GO-[0-9]{4}-[0-9]+[[:space:]]+#[[:space:]]*[^[:space:]]' "$ignore" || true)
+            if [ -n "$bad" ]; then
+              echo "::error file=$ignore::every entry needs a reason: GO-YYYY-NNNN  # why the vulnerable code is not exposed"
+              echo "$bad"
+              exit 1
+            fi
+            ignored=$(grep -oE '^[[:space:]]*GO-[0-9]{4}-[0-9]+' "$ignore" | sed 's/[[:space:]]//g' | sort -u)
+          fi
+          summary() { jq -r --arg id "$1" 'select(.osv.id? == $id) | .osv.summary' "$report" | head -n1; }
+          status=0
+          for id in $found; do
+            if grep -qxF "$id" <<< "$ignored"; then
+              echo "accepted  $id  $(summary "$id")  (reason in $ignore)"
+            else
+              echo "::error::$id is reachable: $(summary "$id")  https://pkg.go.dev/vuln/$id"
+              status=1
+            fi
+          done
+          for id in $ignored; do
+            grep -qxF "$id" <<< "$found" || echo "::warning file=$ignore::$id is no longer reported as reachable; remove it from $ignore"
+          done
+          [ "$status" -eq 0 ] && echo "govulncheck: no reachable vulnerabilities outside $ignore"
+          exit "$status"
+          AUDIT
+              )
               test="go test -race -covermode=atomic -coverprofile=coverage.out ./... && go run github.com/boumenot/gocover-cobertura@${gocover_cobertura} < coverage.out > coverage.xml"
               ;;
             rust)

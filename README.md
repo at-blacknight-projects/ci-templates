@@ -106,6 +106,23 @@ Images go to `ghcr.io/<owner>/<repo>`, charts to `oci://ghcr.io/<owner>/charts`.
   Executables get `SHA256SUMS` with a Sigstore signature and build-provenance
   attestations.
 
+## Accepting a Go vulnerability (`.govulncheck-ignore`)
+
+The Go audit runs `govulncheck` and fails on every vulnerability your code can actually
+reach. govulncheck itself can't accept a finding, so when one can't be fixed (no fixed
+module version exists) and you've confirmed the vulnerable code isn't exposed, list it in
+`.govulncheck-ignore` at the module root, **with the reason**:
+
+```
+# GO-ID  # why the vulnerable code is not exposed
+GO-2026-5528  # CVE-2026-21728: tempo server code; we import only pkg/traceql
+```
+
+- An entry without a `# reason` fails the audit.
+- Any reachable finding that isn't listed still fails.
+- Accepted findings are printed on every run, so they stay visible.
+- Entries that are no longer reported raise a warning to remove them.
+
 ## Signing executables with your own certificates
 
 There are no keys in this repo. Pass yours as secrets. Each kind of signing turns on
