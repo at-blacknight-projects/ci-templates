@@ -156,6 +156,10 @@ can see secrets, never touch a key.
   `attestations: write` it never uses.
 - **Untrusted values.** Never interpolate `${{ inputs.* }}` or `${{ github.event.* }}`
   straight into `run:`. Pass them through `env:` and quote them.
+- **No `pull_request_target` or `workflow_run` triggers.** They run with secrets and a
+  write token. A workflow that checks out a PR's code under them hands those secrets to
+  whoever opened the PR, and these repos are public. Use `pull_request`, which gives fork
+  PRs neither.
 - **Fork PRs.** They get a read-only token. Steps that write (PR comments, SARIF
   upload) use `continue-on-error: true` and report in the job summary instead.
 - **Header comment.** Each stage opens with a comment saying what it does, which

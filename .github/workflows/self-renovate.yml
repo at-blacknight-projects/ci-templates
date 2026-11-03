@@ -34,6 +34,7 @@ jobs:
         at-blacknight-projects/ci-templates
       dry-run: ${{ inputs.dry-run != 'off' && inputs.dry-run || '' }}
       log-level: ${{ inputs.log-level || 'info' }}
+    # at-b-bot's org secrets, shared with self-release; visible to selected repos only.
     secrets:
-      app-id: ${{ secrets.RENOVATE_APP_ID }}
-      app-private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+      app-id: ${{ secrets.RELEASE_APP_ID }}
+      app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
