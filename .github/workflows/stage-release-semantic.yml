@@ -1,0 +1,226 @@
+name: Semantic Release (Actual)
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version for semantic-release'
+        required: false
+        type: string
+        default: '20.x'
+      git-user-name:
+        description: 'Git committer name for changelog commits'
+        required: false
+        type: string
+        default: 'Release Bot'
+      git-user-email:
+        description: 'Git committer email for changelog commits'
+        required: false
+        type: string
+        default: 'release-bot@github.com'
+      download-artifacts:
+        description: 'Whether to download build artifacts and attach to release'
+        required: false
+        type: boolean
+        default: true
+      artifact-pattern:
+        description: 'Pattern for artifacts to download (e.g., build-*)'
+        required: false
+        type: string
+        default: 'build-*'
+      git-commit-files:
+        description: 'Additional files to commit with changelog (glob pattern or array)'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      version:
+        description: 'Released version'
+        value: ${{ jobs.release.outputs.version }}
+      release-url:
+        description: 'GitHub release URL'
+        value: ${{ jobs.release.outputs.release-url }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semantic.outputs.version }}
+      release-url: ${{ steps.semantic.outputs.release-url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "${{ inputs.git-user-name }}"
+          git config user.email "${{ inputs.git-user-email }}"
+
+      - name: Install semantic-release
+        run: |
+          npm install -g semantic-release@23 \
+            @semantic-release/changelog@6 \
+            @semantic-release/git@10 \
+            @semantic-release/github@10 \
+            conventional-changelog-conventionalcommits@7
+
+      - name: Download build artifacts
+        if: inputs.download-artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ inputs.artifact-pattern }}
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: Restore artifact files to repository
+        if: inputs.git-commit-files != ''
+        run: |
+          echo "Restoring artifact files to repository root..."
+          if [ -d "./artifacts" ]; then
+            # Copy all files from artifacts directory to repository root, preserving structure
+            cp -rv ./artifacts/* . 2>/dev/null || true
+            echo "Artifact files restored"
+            ls -la
+          else
+            echo "No artifacts directory found"
+          fi
+
+      - name: Determine changelog filename
+        id: changelog-file
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          if [ "$BRANCH" = "main" ]; then
+            CHANGELOG_FILE="CHANGELOG.md"
+          else
+            CHANGELOG_FILE="CHANGELOG-${BRANCH}.md"
+          fi
+          echo "changelog_file=$CHANGELOG_FILE" >> $GITHUB_OUTPUT
+          echo "Using changelog file: $CHANGELOG_FILE"
+
+      - name: Create semantic-release config
+        run: |
+          # Build git assets array
+          GIT_ASSETS='["${{ steps.changelog-file.outputs.changelog_file }}"'
+          if [ -n "${{ inputs.git-commit-files }}" ]; then
+            GIT_ASSETS="$GIT_ASSETS, \"${{ inputs.git-commit-files }}\""
+          fi
+          GIT_ASSETS="$GIT_ASSETS]"
+
+          cat > .releaserc.json << "EOF"
+          {
+            "branches": [
+              "main",
+              { "name": "rc", "prerelease": true },
+              { "name": "uat", "prerelease": true },
+              { "name": "dev", "prerelease": true },
+              { "name": "alpha", "prerelease": true }
+            ],
+            "plugins": [
+              [
+                "@semantic-release/commit-analyzer",
+                {
+                  "preset": "conventionalcommits",
+                  "releaseRules": [
+                    { "type": "feat", "release": "minor" },
+                    { "type": "fix", "release": "patch" },
+                    { "type": "perf", "release": "patch" },
+                    { "type": "revert", "release": "patch" },
+                    { "type": "docs", "release": false },
+                    { "type": "style", "release": false },
+                    { "type": "chore", "release": false },
+                    { "type": "refactor", "release": false },
+                    { "type": "test", "release": false },
+                    { "type": "build", "release": false },
+                    { "type": "ci", "release": false },
+                    { "breaking": true, "release": "major" }
+                  ]
+                }
+              ],
+              [
+                "@semantic-release/release-notes-generator",
+                {
+                  "preset": "conventionalcommits",
+                  "presetConfig": {
+                    "types": [
+                      { "type": "feat", "section": "Features" },
+                      { "type": "fix", "section": "Bug Fixes" },
+                      { "type": "perf", "section": "Performance" },
+                      { "type": "revert", "section": "Reverts" },
+                      { "type": "docs", "section": "Documentation", "hidden": false },
+                      { "type": "style", "section": "Styles", "hidden": true },
+                      { "type": "chore", "section": "Chores", "hidden": true },
+                      { "type": "refactor", "section": "Refactoring", "hidden": true },
+                      { "type": "test", "section": "Tests", "hidden": true },
+                      { "type": "build", "section": "Build", "hidden": true },
+                      { "type": "ci", "section": "CI/CD", "hidden": true }
+                    ]
+                  }
+                }
+              ],
+              [
+                "@semantic-release/changelog",
+                {
+                  "changelogFile": "${{ steps.changelog-file.outputs.changelog_file }}"
+                }
+              ],
+              [
+                "@semantic-release/github",
+                {
+                  "assets": [
+                    { "path": "artifacts/**/*" }
+                  ]
+                }
+              ],
+              [
+                "@semantic-release/git",
+                {
+                  "assets": $GIT_ASSETS,
+                  "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+                }
+              ]
+            ]
+          }
+          EOF
+
+          # Replace placeholders with actual values
+          sed -i "s|\$GIT_ASSETS|$GIT_ASSETS|g" .releaserc.json
+
+          echo "Generated .releaserc.json:"
+          cat .releaserc.json
+
+      - name: Run semantic-release
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Run semantic-release for real
+          npx semantic-release 2>&1 | tee semantic-release.log
+
+          # Extract version from output
+          if grep -q "Published release" semantic-release.log; then
+            VERSION=$(grep "Published release" semantic-release.log | grep -oP 'v?\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?' | head -1)
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "release-url=https://github.com/${{ github.repository }}/releases/tag/v$VERSION" >> $GITHUB_OUTPUT
+            echo "✅ Release created: v$VERSION"
+          else
+            echo "ℹ️  No release created"
+          fi
+
+      - name: Display release info
+        if: steps.semantic.outputs.version
+        run: |
+          echo "==========================================="
+          echo "  RELEASE SUMMARY"
+          echo "==========================================="
+          echo "Version: ${{ steps.semantic.outputs.version }}"
+          echo "Release URL: ${{ steps.semantic.outputs.release-url }}"
+          echo "==========================================="

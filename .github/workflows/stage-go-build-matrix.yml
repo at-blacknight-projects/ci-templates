@@ -1,0 +1,254 @@
+name: Go Multi-Platform Build
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: 'Go version to use for builds'
+        required: false
+        type: string
+        default: '1.24'
+      version:
+        description: 'Version to inject via ldflags'
+        required: true
+        type: string
+      platforms:
+        description: 'Comma-separated list of platforms (e.g., linux/amd64,windows/amd64)'
+        required: false
+        type: string
+        default: 'linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64'
+      binary-name:
+        description: 'Name of the binary to build'
+        required: true
+        type: string
+      ldflags-template:
+        description: 'Template for ldflags (use {{version}} placeholder)'
+        required: false
+        type: string
+        default: '-X main.version={{version}}'
+      enable-windows-resource:
+        description: 'Enable Windows .exe resource embedding with goversioninfo'
+        required: false
+        type: boolean
+        default: false
+      windows-company-name:
+        description: 'Company name for Windows .exe metadata'
+        required: false
+        type: string
+        default: ''
+      windows-product-name:
+        description: 'Product name for Windows .exe metadata'
+        required: false
+        type: string
+        default: ''
+      windows-file-description:
+        description: 'File description for Windows .exe metadata'
+        required: false
+        type: string
+        default: ''
+      windows-copyright:
+        description: 'Copyright for Windows .exe metadata'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Generate build matrix
+        id: set-matrix
+        run: |
+          # Convert comma-separated platforms to matrix JSON
+          PLATFORMS="${{ inputs.platforms }}"
+          MATRIX_JSON='{"include":['
+
+          IFS=',' read -ra PLATFORM_ARRAY <<< "$PLATFORMS"
+          FIRST=true
+
+          for platform in "${PLATFORM_ARRAY[@]}"; do
+            IFS='/' read -r GOOS GOARCH <<< "$platform"
+
+            if [ "$FIRST" = true ]; then
+              FIRST=false
+            else
+              MATRIX_JSON+=','
+            fi
+
+            MATRIX_JSON+="{\"goos\":\"$GOOS\",\"goarch\":\"$GOARCH\"}"
+          done
+
+          MATRIX_JSON+=']}'
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "Generated matrix: $MATRIX_JSON"
+
+  build-binaries:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Install goversioninfo (Windows only)
+        if: inputs.enable-windows-resource && matrix.goos == 'windows'
+        run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+
+      - name: Create versioninfo.json (Windows only)
+        if: inputs.enable-windows-resource && matrix.goos == 'windows'
+        run: |
+          # Extract version components
+          VERSION="${{ inputs.version }}"
+          # Remove 'v' prefix if present
+          VERSION="${VERSION#v}"
+
+          # Split version into components (major.minor.patch)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          # Remove any pre-release suffix from patch
+          PATCH="${PATCH%%-*}"
+
+          # Defaults
+          COMPANY="${{ inputs.windows-company-name }}"
+          PRODUCT="${{ inputs.windows-product-name || inputs.binary-name }}"
+          DESCRIPTION="${{ inputs.windows-file-description || inputs.binary-name }}"
+          COPYRIGHT="${{ inputs.windows-copyright || format('Copyright (c) {0}', github.repository_owner) }}"
+
+          cat > versioninfo.json << EOF
+          {
+            "FixedFileInfo": {
+              "FileVersion": {
+                "Major": ${MAJOR:-0},
+                "Minor": ${MINOR:-0},
+                "Patch": ${PATCH:-0},
+                "Build": 0
+              },
+              "ProductVersion": {
+                "Major": ${MAJOR:-0},
+                "Minor": ${MINOR:-0},
+                "Patch": ${PATCH:-0},
+                "Build": 0
+              },
+              "FileFlagsMask": "3f",
+              "FileFlags": "00",
+              "FileOS": "040004",
+              "FileType": "01",
+              "FileSubType": "00"
+            },
+            "StringFileInfo": {
+              "CompanyName": "$COMPANY",
+              "FileDescription": "$DESCRIPTION",
+              "FileVersion": "$VERSION",
+              "InternalName": "${{ inputs.binary-name }}",
+              "LegalCopyright": "$COPYRIGHT",
+              "OriginalFilename": "${{ inputs.binary-name }}.exe",
+              "ProductName": "$PRODUCT",
+              "ProductVersion": "$VERSION"
+            },
+            "VarFileInfo": {
+              "Translation": {
+                "LangID": "0409",
+                "CharsetID": "04B0"
+              }
+            }
+          }
+          EOF
+
+          echo "Generated versioninfo.json:"
+          cat versioninfo.json
+
+      - name: Generate resource.syso (Windows only)
+        if: inputs.enable-windows-resource && matrix.goos == 'windows'
+        run: |
+          goversioninfo -platform-specific=true -arm=true
+          ls -lh resource*.syso
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          # Replace {{version}} in ldflags template
+          LDFLAGS="${{ inputs.ldflags-template }}"
+          LDFLAGS="${LDFLAGS//\{\{version\}\}/${{ inputs.version }}}"
+
+          # Determine binary extension
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            EXT=".exe"
+          fi
+
+          # Build binary
+          OUTPUT="${{ inputs.binary-name }}-${{ matrix.goos }}-${{ matrix.goarch }}${EXT}"
+
+          echo "Building: $OUTPUT"
+          echo "LDFLAGS: $LDFLAGS"
+
+          go build -ldflags "$LDFLAGS" -o "$OUTPUT"
+
+          # Verify binary
+          ls -lh "$OUTPUT"
+          file "$OUTPUT"
+
+      - name: Create archive
+        run: |
+          # Determine binary extension
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            EXT=".exe"
+          fi
+
+          # Binary was built with platform-specific name (safe, no collisions)
+          BUILT_BINARY="${{ inputs.binary-name }}-${{ matrix.goos }}-${{ matrix.goarch }}${EXT}"
+
+          # Clean name for inside the zip
+          CLEAN_BINARY="${{ inputs.binary-name }}${EXT}"
+
+          ARCHIVE="${{ inputs.binary-name }}-${{ inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip"
+
+          # Rename binary to clean name for zip
+          mv "$BUILT_BINARY" "$CLEAN_BINARY"
+
+          # Create ZIP archive with clean-named binary
+          zip "$ARCHIVE" "$CLEAN_BINARY"
+
+          # Generate checksum
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
+          echo "Created: $ARCHIVE"
+          ls -lh "$ARCHIVE"*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ inputs.binary-name }}-${{ inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+            ${{ inputs.binary-name }}-${{ inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip.sha256
+          retention-days: 5
+
+  build-summary:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display build summary
+        run: |
+          echo "==========================================="
+          echo "  GO BUILD SUMMARY"
+          echo "==========================================="
+          echo "Binary name: ${{ inputs.binary-name }}"
+          echo "Version: ${{ inputs.version }}"
+          echo "Go version: ${{ inputs.go-version }}"
+          echo "Platforms: ${{ inputs.platforms }}"
+          echo "Windows resource: ${{ inputs.enable-windows-resource }}"
+          echo "==========================================="
