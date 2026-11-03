@@ -1,3 +1,9 @@
+## [0.4.0](https://github.com/at-blacknight-projects/ci-templates/compare/v0.3.0...v0.4.0) (2026-11-03)
+
+### Features
+
+* accept justified Go vulnerabilities through .govulncheck-ignore ([28feda6](https://github.com/at-blacknight-projects/ci-templates/commit/28feda60ab19ab9998aa75e567cbb58c26f62ad8))
+
 ## [0.3.0](https://github.com/at-blacknight-projects/ci-templates/compare/v0.2.1...v0.3.0) (2026-11-03)
 
 ### Features
