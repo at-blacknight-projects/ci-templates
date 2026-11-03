@@ -149,6 +149,11 @@ can see secrets, never touch a key.
 - **Permissions.** Default to `permissions: contents: read` at workflow level and grant
   more per job, at the minimum needed. Document in the stage header what the caller has
   to grant, since a called workflow can't get more than its caller has.
+  **Exception: stages with a `publish` switch** (`stage-container-build`,
+  `stage-package`) declare no `permissions:` at all and take what the calling job grants.
+  Otherwise their release-time write permissions would become a ceiling every CI caller
+  had to grant, and a check build would start with `packages`, `id-token` and
+  `attestations: write` it never uses.
 - **Untrusted values.** Never interpolate `${{ inputs.* }}` or `${{ github.event.* }}`
   straight into `run:`. Pass them through `env:` and quote them.
 - **Fork PRs.** They get a read-only token. Steps that write (PR comments, SARIF

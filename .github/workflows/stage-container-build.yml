@@ -86,19 +86,15 @@ on:
         description: Password of the cosign key.
         required: false
 
-permissions:
-  contents: read
+# No permissions block on purpose: this stage runs as a check build (needs contents: read,
+# plus security-events: write for SARIF) or as a release (also packages, id-token and
+# attestations: write). It takes whatever the calling job grants, so CI callers don't
+# have to grant release permissions.
 
 jobs:
   image:
     name: ${{ matrix.name || github.event.repository.name }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-      security-events: write
     strategy:
       fail-fast: false
       matrix:

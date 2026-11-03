@@ -112,7 +112,7 @@ jobs:
     name: Package
     needs: build
     uses: ./.github/workflows/stage-package.yml
-    permissions: { contents: read, id-token: write, attestations: write }
+    permissions: { contents: read }
     with:
       name: ${{ needs.build.outputs.name }}
       version: ${{ needs.build.outputs.version }}

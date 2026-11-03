@@ -30,8 +30,6 @@ permissions:
   actions: read
   pull-requests: write
   security-events: write
-  id-token: write
-  attestations: write
 jobs:
   ci:
     uses: at-blacknight-projects/ci-templates/.github/workflows/executable-ci.yml@v1

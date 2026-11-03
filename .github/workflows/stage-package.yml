@@ -119,18 +119,15 @@ on:
         description: Passphrase of the GPG key.
         required: false
 
-permissions:
-  contents: read
+# No permissions block on purpose: archive-only check builds need contents: read; publishing
+# also needs id-token and attestations: write. The stage takes whatever the calling job
+# grants, so CI callers don't have to grant signing permissions.
 
 jobs:
   package:
     name: Package${{ inputs.publish && ' and sign' || '' }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/download-artifact@v8
         with:
