@@ -10,12 +10,19 @@ while read -r ref; do
   repo=$(cut -d@ -f1 <<< "$ref" | cut -d/ -f1-2)
   ver=${ref##*@}
   [ "$repo" = "${GITHUB_REPOSITORY:-}" ] && continue
-  # Anonymous lookups only: some orgs put an IP allow list on token-authenticated API
-  # access, which refuses runners even for public repos (aquasecurity does).
+  # Git protocol only, never the REST API: some orgs put an IP allow list on
+  # token-authenticated API access (aquasecurity does), and anonymous API calls share
+  # a 60/hour limit per runner IP. GitHub serves any reachable commit by SHA over git.
   found=0 ; detail=""
   if [[ "$ver" =~ ^[0-9a-f]{40}$ ]]; then
-    code=$(curl "https://api.github.com/repos/$repo/commits/$ver" -s -o /dev/null -w '%{http_code}')
-    [ "$code" = 200 ] && found=1 || detail=" (commit lookup: HTTP $code)"
+    tmp=$(mktemp -d)
+    git init -q --bare "$tmp"
+    if git -C "$tmp" fetch -q --depth=1 "https://github.com/$repo" "$ver" 2> "$tmp/err"; then
+      found=1
+    else
+      detail=" ($(head -c 200 "$tmp/err" | tr '\n' ' '))"
+    fi
+    rm -rf "$tmp"
   elif git ls-remote --exit-code "https://github.com/$repo" "refs/tags/$ver" "refs/heads/$ver" > /dev/null 2>&1; then
     found=1
   fi
