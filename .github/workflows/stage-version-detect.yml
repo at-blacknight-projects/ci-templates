@@ -1,5 +1,17 @@
 name: Version Detection (Semantic Release Dry-Run)
 
+# Works out the next version from conventional commits, without tagging anything.
+#
+# Config: if the repo has its own semantic-release config (.releaserc*, release.config.*
+# or a "release" key in package.json), that config is used. Otherwise the default below
+# is generated. Either way, the config that was used is uploaded as the
+# `semantic-release-config` artifact, and stage-release-semantic releases with that same
+# file. That way the dry run and the real release can't disagree.
+#
+# Outputs come from @at-blacknight/semantic-release-ci-output, which writes to
+# $GITHUB_OUTPUT during the dry run. A repo-owned config must list that plugin; a JSON
+# config without it gets the plugin appended for the run.
+
 on:
   workflow_call:
     inputs:
@@ -7,7 +19,7 @@ on:
         description: 'Node.js version for semantic-release'
         required: false
         type: string
-        default: '20.x'
+        default: '24'
       upload-artifacts:
         description: 'Whether to upload changelog artifacts'
         required: false
@@ -18,6 +30,13 @@ on:
         required: false
         type: string
         default: ''
+    secrets:
+      app-id:
+        description: 'GitHub App ID. With app-private-key, semantic-release runs as the app, so it can push past branch protection.'
+        required: false
+      app-private-key:
+        description: 'GitHub App private key.'
+        required: false
     outputs:
       version:
         description: 'Next semantic version (e.g., 1.2.3)'
@@ -26,11 +45,14 @@ on:
         description: 'Whether a release would be created (true/false)'
         value: ${{ jobs.version-detect.outputs.would-release }}
       release-type:
-        description: 'Type of release (major, minor, patch)'
+        description: 'Type of release (major, minor, patch, prerelease)'
         value: ${{ jobs.version-detect.outputs.release-type }}
       release-channel:
-        description: 'Release channel (main, uat, develop)'
+        description: 'Release channel (empty for the default channel)'
         value: ${{ jobs.version-detect.outputs.release-channel }}
+      prerelease:
+        description: 'Whether the next version is a pre-release (true/false)'
+        value: ${{ jobs.version-detect.outputs.prerelease }}
       git-tag:
         description: 'Git tag name that will be created (e.g., v1.2.3)'
         value: ${{ jobs.version-detect.outputs.git-tag }}
@@ -38,173 +60,217 @@ on:
         description: 'Generated changelog content'
         value: ${{ jobs.version-detect.outputs.release-notes }}
 
+permissions:
+  contents: read
+
 jobs:
   version-detect:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.semantic.outputs.version }}
-      would-release: ${{ steps.semantic.outputs.would-release }}
-      release-type: ${{ steps.semantic.outputs.release-type }}
-      release-channel: ${{ steps.semantic.outputs.release-channel }}
-      git-tag: ${{ steps.semantic.outputs.git-tag }}
-      release-notes: ${{ steps.semantic.outputs.release-notes }}
+      would-release: ${{ steps.semantic.outputs.would_release || 'false' }}
+      release-type: ${{ steps.semantic.outputs.release_type }}
+      release-channel: ${{ steps.semantic.outputs.release_channel }}
+      prerelease: ${{ contains(steps.semantic.outputs.version, '-') }}
+      git-tag: ${{ steps.semantic.outputs.git_tag }}
+      release-notes: ${{ steps.notes.outputs.release-notes }}
 
     steps:
+      - name: Check for a GitHub App
+        id: app
+        env:
+          APP_ID: ${{ secrets.app-id }}
+          APP_KEY: ${{ secrets.app-private-key }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub App token
+        id: app-token
+        if: steps.app.outputs.enabled == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.branch || github.ref }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
 
       - name: Install semantic-release
         run: |
-          npm install -g semantic-release@23 \
+          npm install -g semantic-release@25 \
             @semantic-release/changelog@6 \
-            @semantic-release/git@10 \
-            @semantic-release/exec@6 \
-            conventional-changelog-conventionalcommits@7
+            @semantic-release/git@11 \
+            @semantic-release/github@12 \
+            conventional-changelog-conventionalcommits@10 \
+            @at-blacknight/semantic-release-ci-output@0.1.0
 
       - name: Determine changelog filename
         id: changelog-file
+        env:
+          BRANCH: ${{ inputs.branch || github.ref_name }}
         run: |
-          BRANCH="${GITHUB_REF#refs/heads/}"
           if [ "$BRANCH" = "main" ]; then
             CHANGELOG_FILE="CHANGELOG.md"
           else
             CHANGELOG_FILE="CHANGELOG-${BRANCH}.md"
           fi
-          echo "changelog_file=$CHANGELOG_FILE" >> $GITHUB_OUTPUT
+          echo "changelog_file=$CHANGELOG_FILE" >> "$GITHUB_OUTPUT"
           echo "Using changelog file: $CHANGELOG_FILE"
 
-      - name: Create semantic-release config
+      - name: Use the repository's semantic-release config
+        id: own-config
         run: |
-          cat > .releaserc.json << "EOF"
-          {
-            "branches": [
-              "main",
-              { "name": "rc", "prerelease": true },
-              { "name": "uat", "prerelease": true },
-              { "name": "dev", "prerelease": true },
-              { "name": "alpha", "prerelease": true }
-            ],
-            "plugins": [
-              [
-                "@semantic-release/commit-analyzer",
-                {
-                  "preset": "conventionalcommits",
-                  "releaseRules": [
-                    { "type": "feat", "release": "minor" },
-                    { "type": "fix", "release": "patch" },
-                    { "type": "perf", "release": "patch" },
-                    { "type": "revert", "release": "patch" },
-                    { "type": "docs", "release": false },
-                    { "type": "style", "release": false },
-                    { "type": "chore", "release": false },
-                    { "type": "refactor", "release": false },
-                    { "type": "test", "release": false },
-                    { "type": "build", "release": false },
-                    { "type": "ci", "release": false },
-                    { "breaking": true, "release": "major" }
-                  ]
-                }
-              ],
-              [
-                "@semantic-release/release-notes-generator",
-                {
-                  "preset": "conventionalcommits",
-                  "presetConfig": {
-                    "types": [
-                      { "type": "feat", "section": "Features" },
-                      { "type": "fix", "section": "Bug Fixes" },
-                      { "type": "perf", "section": "Performance" },
-                      { "type": "revert", "section": "Reverts" },
-                      { "type": "docs", "section": "Documentation", "hidden": false },
-                      { "type": "style", "section": "Styles", "hidden": true },
-                      { "type": "chore", "section": "Chores", "hidden": true },
-                      { "type": "refactor", "section": "Refactoring", "hidden": true },
-                      { "type": "test", "section": "Tests", "hidden": true },
-                      { "type": "build", "section": "Build", "hidden": true },
-                      { "type": "ci", "section": "CI/CD", "hidden": true }
-                    ]
-                  }
-                }
-              ],
-              [
-                "@semantic-release/exec",
-                {
-                  "verifyConditionsCmd": "echo \"would-release=false\" >> $GITHUB_OUTPUT",
-                  "generateNotesCmd": "echo \"version=${nextRelease.version}\" >> $GITHUB_OUTPUT && echo \"would-release=true\" >> $GITHUB_OUTPUT && echo \"release-type=${nextRelease.type}\" >> $GITHUB_OUTPUT && echo \"release-channel=${nextRelease.channel || 'main'}\" >> $GITHUB_OUTPUT && echo \"git-tag=v${nextRelease.version}\" >> $GITHUB_OUTPUT && echo \"${nextRelease.notes}\" > CHANGELOG-NEW.md"
-                }
-              ],
-              [
-                "@semantic-release/changelog",
-                {
-                  "changelogFile": "CHANGELOG_FILE_PLACEHOLDER"
-                }
-              ]
-            ]
-          }
-          EOF
+          own=""
+          for f in .releaserc .releaserc.json .releaserc.yaml .releaserc.yml .releaserc.js .releaserc.cjs .releaserc.mjs \
+                   release.config.js release.config.cjs release.config.mjs; do
+            if [ -f "$f" ]; then own=$f; break; fi
+          done
+          if [ -z "$own" ] && [ -f package.json ] && jq -e '.release' package.json > /dev/null; then
+            own=package.json
+          fi
+          if [ -z "$own" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-          # Replace placeholder with actual changelog file
-          sed -i "s|CHANGELOG_FILE_PLACEHOLDER|${{ steps.changelog-file.outputs.changelog_file }}|g" .releaserc.json
+          echo "Using the repository's own config: $own"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          if ! grep -q 'semantic-release-ci-output' "$own"; then
+            if { [ "$own" = .releaserc.json ] || [ "$own" = .releaserc ]; } && jq -e . "$own" > /dev/null 2>&1; then
+              jq '.plugins += ["@at-blacknight/semantic-release-ci-output"]' "$own" > .releaserc.tmp
+              mv .releaserc.tmp "$own"
+              echo "Appended @at-blacknight/semantic-release-ci-output to $own for this run"
+            else
+              echo "::error file=$own::$own must list @at-blacknight/semantic-release-ci-output; it is how this workflow reads the next version"
+              exit 1
+            fi
+          fi
+          mkdir -p .semantic-release-config
+          cp "$own" .semantic-release-config/
+
+      - name: Create default semantic-release config
+        if: steps.own-config.outputs.found == 'false'
+        env:
+          CHANGELOG_FILE: ${{ steps.changelog-file.outputs.changelog_file }}
+        run: |
+          jq -n --arg changelog "$CHANGELOG_FILE" '{
+            branches: [
+              "main",
+              { name: "rc", prerelease: true },
+              { name: "uat", prerelease: true },
+              { name: "dev", prerelease: true },
+              { name: "alpha", prerelease: true }
+            ],
+            plugins: [
+              ["@semantic-release/commit-analyzer", {
+                preset: "conventionalcommits",
+                releaseRules: [
+                  { type: "feat", release: "minor" },
+                  { type: "fix", release: "patch" },
+                  { type: "perf", release: "patch" },
+                  { type: "revert", release: "patch" },
+                  { type: "docs", release: false },
+                  { type: "style", release: false },
+                  { type: "chore", release: false },
+                  { type: "refactor", release: false },
+                  { type: "test", release: false },
+                  { type: "build", release: false },
+                  { type: "ci", release: false },
+                  { breaking: true, release: "major" }
+                ]
+              }],
+              ["@semantic-release/release-notes-generator", {
+                preset: "conventionalcommits",
+                presetConfig: { types: [
+                  { type: "feat", section: "Features" },
+                  { type: "fix", section: "Bug Fixes" },
+                  { type: "perf", section: "Performance" },
+                  { type: "revert", section: "Reverts" },
+                  { type: "docs", section: "Documentation", hidden: false },
+                  { type: "style", section: "Styles", hidden: true },
+                  { type: "chore", section: "Chores", hidden: true },
+                  { type: "refactor", section: "Refactoring", hidden: true },
+                  { type: "test", section: "Tests", hidden: true },
+                  { type: "build", section: "Build", hidden: true },
+                  { type: "ci", section: "CI/CD", hidden: true }
+                ]}
+              }],
+              "@at-blacknight/semantic-release-ci-output",
+              ["@semantic-release/changelog", { changelogFile: $changelog }],
+              ["@semantic-release/github", { assets: [{ path: "artifacts/**/*" }] }],
+              ["@semantic-release/git", {
+                assets: [$changelog],
+                message: "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+              }]
+            ]
+          }' > .releaserc.json
+          mkdir -p .semantic-release-config
+          cp .releaserc.json .semantic-release-config/
+          cat .releaserc.json
 
       - name: Run semantic-release (dry-run)
         id: semantic
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # Set default outputs
-          echo "version=" >> $GITHUB_OUTPUT
-          echo "would-release=false" >> $GITHUB_OUTPUT
-          echo "release-type=" >> $GITHUB_OUTPUT
-          echo "release-channel=main" >> $GITHUB_OUTPUT
-          echo "git-tag=" >> $GITHUB_OUTPUT
-          echo "release-notes=" >> $GITHUB_OUTPUT
-
-          # Run semantic-release in dry-run mode
-          npx semantic-release --dry-run --no-ci 2>&1 | tee semantic-release.log
-
-          # Check if a release would be created
-          if grep -q "The next release version is" semantic-release.log; then
-            echo "✅ Release would be created"
-          else
-            echo "ℹ️  No release would be created (no releasable commits)"
-          fi
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: npx semantic-release --dry-run
 
       - name: Extract release notes
-        if: steps.semantic.outputs.would-release == 'true'
+        if: steps.semantic.outputs.would_release == 'true'
         id: notes
         run: |
-          if [ -f CHANGELOG.md ]; then
-            # Extract the latest release notes (first section after header)
-            NOTES=$(awk '/^## / { if (++count == 2) exit } count == 1 { print }' CHANGELOG.md)
-            echo "release-notes<<EOF" >> $GITHUB_OUTPUT
-            echo "$NOTES" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+          if [ -f CHANGELOG-NEW.md ]; then
+            {
+              echo "release-notes<<__NOTES__"
+              cat CHANGELOG-NEW.md
+              echo "__NOTES__"
+            } >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Upload semantic-release config
+        if: steps.semantic.outputs.would_release == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: semantic-release-config
+          path: .semantic-release-config/
+          include-hidden-files: true
+          retention-days: 5
+
       - name: Upload changelog artifact
-        if: inputs.upload-artifacts && steps.semantic.outputs.would-release == 'true'
-        uses: actions/upload-artifact@v4
+        if: inputs.upload-artifacts && steps.semantic.outputs.would_release == 'true'
+        uses: actions/upload-artifact@v7
         with:
           name: changelog
           path: CHANGELOG-NEW.md
           retention-days: 5
 
       - name: Display version info
+        env:
+          WOULD_RELEASE: ${{ steps.semantic.outputs.would_release || 'false' }}
+          VERSION: ${{ steps.semantic.outputs.version }}
+          TYPE: ${{ steps.semantic.outputs.release_type }}
+          CHANNEL: ${{ steps.semantic.outputs.release_channel }}
+          TAG: ${{ steps.semantic.outputs.git_tag }}
         run: |
-          echo "==========================================="
-          echo "  VERSION DETECTION SUMMARY"
-          echo "==========================================="
-          echo "Would release: ${{ steps.semantic.outputs.would-release }}"
-          echo "Next version: ${{ steps.semantic.outputs.version }}"
-          echo "Release type: ${{ steps.semantic.outputs.release-type }}"
-          echo "Release channel: ${{ steps.semantic.outputs.release-channel }}"
-          echo "Git tag: ${{ steps.semantic.outputs.git-tag }}"
-          echo "==========================================="
+          {
+            echo "### Version detection"
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Would release | $WOULD_RELEASE |"
+            echo "| Next version | ${VERSION:--} |"
+            echo "| Release type | ${TYPE:--} |"
+            echo "| Channel | ${CHANNEL:-default} |"
+            echo "| Git tag | ${TAG:--} |"
+          } >> "$GITHUB_STEP_SUMMARY"
