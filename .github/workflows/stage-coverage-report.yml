@@ -1,0 +1,128 @@
+name: Coverage report (stage)
+
+# Reads the `coverage` artifact (Cobertura coverage.xml from stage-test) and works the
+# same way for every language.
+#
+#   - CodeCoverageSummary turns the report into a markdown table with health indicators.
+#   - On pull requests, the newest `coverage` artifact from the base branch gives the
+#     delta. That artifact exists once the base branch has run the same CI on push.
+#   - The report goes to the job summary, and to one PR comment that is updated on each push.
+#   - Line coverage below the threshold fails the check, after the report has been posted.
+#
+# Caller grants: contents: read, actions: read (base artifact), pull-requests: write (comment).
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: Artifact containing coverage.xml (Cobertura).
+        type: string
+        default: coverage
+      title:
+        description: Report heading. It also identifies the PR comment, so give each report in a repo its own title.
+        type: string
+        default: Coverage
+      threshold:
+        description: Minimum line coverage, in percent. 0 turns the gate off.
+        type: number
+        default: 0
+      healthy:
+        description: Line coverage, in percent, shown as healthy (green) in the report.
+        type: number
+        default: 80
+      comment:
+        description: Comment on pull requests.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: current
+
+      - name: Fetch base-branch coverage
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v28
+        continue-on-error: true
+        with:
+          # Only finished push runs on the base branch. Without these filters the search
+          # can return this PR's own in-progress run and report a ±0 delta against itself.
+          branch: ${{ github.base_ref }}
+          event: push
+          workflow_conclusion: completed
+          name: ${{ inputs.artifact-name }}
+          path: base
+          search_artifacts: true
+          if_no_artifact_found: warn
+
+      - name: Summarise
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: current/coverage.xml
+          format: markdown
+          output: file
+          badge: false
+          hide_complexity: true
+          indicators: true
+          thresholds: ${{ format('{0} {1}', inputs.threshold, inputs.healthy) }}
+
+      - name: Build report
+        id: report
+        env:
+          TITLE: ${{ inputs.title }}
+          THRESHOLD: ${{ inputs.threshold }}
+        run: |
+          rate() { python3 -c 'import sys, xml.etree.ElementTree as E; print(round(float(E.parse(sys.argv[1]).getroot().get("line-rate", 0)) * 100, 2))' "$1"; }
+          total=$(rate current/coverage.xml)
+          delta=""
+          if [ -f base/coverage.xml ]; then
+            was=$(rate base/coverage.xml)
+            delta=$(python3 -c 'import sys; d = float(sys.argv[1]) - float(sys.argv[2]); print("(±0)" if abs(d) < 0.005 else ("(▲ +%.2f)" if d > 0 else "(▼ %.2f)") % d)' "$total" "$was")
+            delta="$delta vs \`${GITHUB_BASE_REF}\` ${was}%"
+          fi
+          if awk -v t="$total" -v m="$THRESHOLD" 'BEGIN { exit !(m > 0 && t < m) }'; then icon="❌"; elif [ "$THRESHOLD" != "0" ]; then icon="✅"; else icon="📊"; fi
+          {
+            echo "### ${icon} ${TITLE}: **${total}%** ${delta}"
+            [ "$THRESHOLD" != "0" ] && echo "" && echo "Threshold: ${THRESHOLD}%"
+            echo ""
+            echo "<details><summary>Details</summary>"
+            echo ""
+            cat code-coverage-results.md
+            echo ""
+            echo "</details>"
+          } > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on the pull request
+        if: github.event_name == 'pull_request' && inputs.comment
+        # PRs from forks get a read-only token; the job summary still has the report.
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: ${{ inputs.title }}
+          path: report.md
+
+      - name: Enforce threshold
+        if: inputs.threshold > 0
+        env:
+          TOTAL: ${{ steps.report.outputs.total }}
+          THRESHOLD: ${{ inputs.threshold }}
+        run: |
+          if awk -v t="$TOTAL" -v m="$THRESHOLD" 'BEGIN { exit !(t < m) }'; then
+            echo "::error::Line coverage ${TOTAL}% is below the ${THRESHOLD}% threshold"
+            exit 1
+          fi
+          echo "Line coverage ${TOTAL}% meets the ${THRESHOLD}% threshold"

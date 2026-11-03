@@ -1,0 +1,19 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Tracks versions pinned where no Renovate manager can see them (inside run: scripts, input defaults, Makefiles). Put a comment on the line directly above the pin:  # renovate: datasource=<datasource> depName=<name> [versioning=<scheme>] [extractVersion=<regex>]  followed by NAME=value, NAME: value or default: value.",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "# renovate: annotations above a pinned version",
+      "managerFilePatterns": [
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/(^|/)action\\.ya?ml$/",
+        "/(^|/)Makefile$/",
+        "/(^|/)(Docker|Container)file[^/]*$/"
+      ],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+?)\\s+depName=(?<depName>\\S+?)(?:\\s+versioning=(?<versioning>\\S+?))?(?:\\s+extractVersion=(?<extractVersion>\\S+?))?\\s*\\n\\s*[A-Za-z0-9_.-]+\\s*[:=?]+\\s*[\"']?(?<currentValue>[^\\s\"']+)"
+      ]
+    }
+  ]
+}

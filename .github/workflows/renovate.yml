@@ -1,0 +1,124 @@
+name: Renovate
+
+# Public API: runs self-hosted Renovate as your own GitHub App, so dependency PRs come
+# from an identity you control, trigger CI, and can push past branch protection.
+# Repos opt in with a renovate.json; this repo's shared policy is
+#   {"extends": ["github>at-blacknight-projects/ci-templates"]}
+#
+# The app needs these repository permissions: Contents, Pull requests, Issues,
+# Workflows (to update .github/workflows) and Commit statuses: read & write;
+# Checks, Administration and Dependabot alerts: read. Install it on the repos Renovate
+# should manage.
+#
+#   on:
+#     schedule: [{ cron: "17 */4 * * *" }]
+#     workflow_dispatch: {}
+#   permissions: { contents: read }
+#   jobs:
+#     renovate:
+#       uses: at-blacknight-projects/ci-templates/.github/workflows/renovate.yml@v1
+#       with:
+#         repositories: |
+#           example/app
+#       secrets:
+#         app-id: ${{ secrets.RENOVATE_APP_ID }}
+#         app-private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+
+on:
+  workflow_call:
+    inputs:
+      repositories:
+        description: Repositories to process (owner/name), one per line. Empty autodiscovers every repo the app is installed on, filtered by autodiscover-filter.
+        type: string
+        default: ""
+      autodiscover-filter:
+        description: "Glob for autodiscovery when repositories is empty. Empty means <owner>/*."
+        type: string
+        default: ""
+      onboarding:
+        description: Open an onboarding PR in repos with no Renovate config. False skips them.
+        type: boolean
+        default: true
+      dry-run:
+        description: "Empty for a real run, or lookup / full to report without changing anything."
+        type: string
+        default: ""
+      log-level:
+        description: debug | info | warn
+        type: string
+        default: info
+      renovate-version:
+        description: Renovate version to run.
+        type: string
+        # renovate: datasource=docker depName=ghcr.io/renovatebot/renovate
+        default: 44.206.2
+    secrets:
+      app-id:
+        description: GitHub App ID Renovate runs as.
+        required: true
+      app-private-key:
+        description: Private key of that app.
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renovate-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    name: Renovate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Resolve settings
+        id: settings
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SLUG: ${{ steps.app-token.outputs.app-slug }}
+          REPOSITORIES: ${{ inputs.repositories }}
+          FILTER: ${{ inputs.autodiscover-filter }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          # Commits are attributed to the app's bot user, so they link to the app.
+          bot_id=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id)
+          echo "git-author=${SLUG}[bot] <${bot_id}+${SLUG}[bot]@users.noreply.github.com>" >> "$GITHUB_OUTPUT"
+
+          repos=$(printf '%s\n' "$REPOSITORIES" | sed '/^[[:space:]]*$/d' | jq -R . | jq -s -c .)
+          if [ "$repos" = "[]" ]; then
+            echo "autodiscover=true" >> "$GITHUB_OUTPUT"
+            echo "filter=${FILTER:-$OWNER/*}" >> "$GITHUB_OUTPUT"
+            echo "Autodiscovering repos matching ${FILTER:-$OWNER/*}"
+          else
+            echo "autodiscover=false" >> "$GITHUB_OUTPUT"
+            echo "repositories=$repos" >> "$GITHUB_OUTPUT"
+            echo "Repositories: $repos"
+          fi
+
+      - uses: renovatebot/github-action@v46.3.12  # no moving major tag upstream
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          renovate-version: ${{ inputs.renovate-version }}
+        env:
+          LOG_LEVEL: ${{ inputs.log-level }}
+          RENOVATE_PLATFORM: github
+          RENOVATE_PLATFORM_COMMIT: enabled
+          RENOVATE_GIT_AUTHOR: ${{ steps.settings.outputs.git-author }}
+          RENOVATE_AUTODISCOVER: ${{ steps.settings.outputs.autodiscover }}
+          RENOVATE_AUTODISCOVER_FILTER: ${{ steps.settings.outputs.filter }}
+          RENOVATE_REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          RENOVATE_ONBOARDING: ${{ inputs.onboarding }}
+          # Repos without a config get an onboarding PR, or are skipped; never processed blind.
+          RENOVATE_REQUIRE_CONFIG: required
+          RENOVATE_ONBOARDING_CONFIG: '{"$schema": "https://docs.renovatebot.com/renovate-schema.json", "extends": ["github>at-blacknight-projects/ci-templates"]}'
+          RENOVATE_DRY_RUN: ${{ inputs.dry-run }}

@@ -1,0 +1,203 @@
+name: Semantic Release (Actual)
+
+# Tags, publishes the GitHub release and commits the changelog. Run it LAST, after every
+# artifact the release points at (binaries, images, charts) exists, so a tag never names
+# something that failed to build.
+#
+# Releases with the config stage-version-detect used (the `semantic-release-config`
+# artifact), so the version tagged here matches the one the build stages were given.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version for semantic-release'
+        required: false
+        type: string
+        default: '24'
+      git-user-name:
+        description: 'Git committer name for changelog commits'
+        required: false
+        type: string
+        default: 'Release Bot'
+      git-user-email:
+        description: 'Git committer email for changelog commits'
+        required: false
+        type: string
+        default: 'release-bot@users.noreply.github.com'
+      download-artifacts:
+        description: 'Whether to download build artifacts and attach to release'
+        required: false
+        type: boolean
+        default: true
+      artifact-pattern:
+        description: 'Pattern for artifacts to download (e.g., build-*)'
+        required: false
+        type: string
+        default: 'build-*'
+      git-commit-files:
+        description: 'Additional files to commit with the changelog: one path or glob per line. Added to the git plugin assets of a JSON config; other config formats must list them themselves.'
+        required: false
+        type: string
+        default: ''
+      restore-artifact:
+        description: 'Artifact whose files are copied over the checkout before releasing (e.g. version-bumped files from an earlier stage)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      app-id:
+        description: 'GitHub App ID. With app-private-key, the release commit and tag are pushed as the app.'
+        required: false
+      app-private-key:
+        description: 'GitHub App private key.'
+        required: false
+    outputs:
+      version:
+        description: 'Released version'
+        value: ${{ jobs.release.outputs.version }}
+      git-tag:
+        description: 'Released git tag'
+        value: ${{ jobs.release.outputs.git-tag }}
+      release-url:
+        description: 'GitHub release URL'
+        value: ${{ jobs.release.outputs.release-url }}
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      version: ${{ steps.semantic.outputs.version }}
+      git-tag: ${{ steps.semantic.outputs.git_tag }}
+      release-url: ${{ steps.url.outputs.release-url }}
+
+    steps:
+      - name: Check for a GitHub App
+        id: app
+        env:
+          APP_ID: ${{ secrets.app-id }}
+          APP_KEY: ${{ secrets.app-private-key }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub App token
+        id: app-token
+        if: steps.app.outputs.enabled == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Configure Git
+        env:
+          GIT_USER_NAME: ${{ inputs.git-user-name }}
+          GIT_USER_EMAIL: ${{ inputs.git-user-email }}
+        run: |
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
+
+      - name: Install semantic-release
+        run: |
+          # renovate: datasource=npm depName=@at-blacknight/semantic-release-ci-output
+          ci_output=0.1.0
+          npm install -g semantic-release@25 \
+            @semantic-release/changelog@6 \
+            @semantic-release/git@11 \
+            @semantic-release/github@12 \
+            conventional-changelog-conventionalcommits@10 \
+            "@at-blacknight/semantic-release-ci-output@${ci_output}"
+
+      - name: Download semantic-release config
+        uses: actions/download-artifact@v8
+        with:
+          name: semantic-release-config
+          path: .semantic-release-config
+
+      - name: Restore semantic-release config
+        run: cp -a .semantic-release-config/. .
+
+      - name: Download build artifacts
+        if: inputs.download-artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ inputs.artifact-pattern }}
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: Download files to restore
+        if: inputs.restore-artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.restore-artifact }}
+          path: .restore
+
+      - name: Restore files to the repository
+        if: inputs.restore-artifact != ''
+        run: |
+          cp -av .restore/. .
+          git status --short
+
+      - name: Add extra files to the git plugin
+        if: inputs.git-commit-files != ''
+        env:
+          FILES: ${{ inputs.git-commit-files }}
+        run: |
+          if [ ! -f .releaserc.json ]; then
+            echo "Config is not .releaserc.json; it must list the git-commit-files in its git plugin assets itself."
+            exit 0
+          fi
+          extra=$(printf '%s\n' "$FILES" | sed '/^[[:space:]]*$/d' | jq -R . | jq -s .)
+          jq --argjson extra "$extra" '
+            .plugins |= map(
+              if (type == "array" and .[0] == "@semantic-release/git")
+              then .[1].assets = ((.[1].assets // []) + $extra | unique)
+              else . end)' .releaserc.json > .releaserc.tmp
+          mv .releaserc.tmp .releaserc.json
+          jq '.plugins[] | select(type == "array" and .[0] == "@semantic-release/git")' .releaserc.json
+
+      - name: Run semantic-release
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: npx semantic-release
+
+      - name: Release URL
+        id: url
+        if: steps.semantic.outputs.git_tag != ''
+        env:
+          TAG: ${{ steps.semantic.outputs.git_tag }}
+        run: echo "release-url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Display release info
+        if: steps.semantic.outputs.version != ''
+        env:
+          VERSION: ${{ steps.semantic.outputs.version }}
+          URL: ${{ steps.url.outputs.release-url }}
+        run: |
+          {
+            echo "### Released ${VERSION}"
+            echo ""
+            echo "${URL}"
+          } >> "$GITHUB_STEP_SUMMARY"

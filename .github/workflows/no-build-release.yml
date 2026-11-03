@@ -1,0 +1,65 @@
+name: No-build release
+
+# Public API for repos with nothing to build. On a push to a release branch: version →
+# optional version edits (replacements / bump-command, as in atb-ci's no-build-release)
+# → tag, GitHub release and changelog commit. Wiring only; see CLAUDE.md.
+#
+#   on: { push: { branches: [main] } }
+#   permissions: { contents: write, issues: write, pull-requests: write }
+#   jobs:
+#     release:
+#       uses: at-blacknight-projects/ci-templates/.github/workflows/no-build-release.yml@v1
+#       secrets:
+#         app-id: ${{ secrets.RELEASE_APP_ID }}
+#         app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+on:
+  workflow_call:
+    inputs:
+      replacements: { description: 'JSON array of {"file", "pattern", "replacement"} version edits.', type: string, default: "[]" }
+      bump-command: { description: Extra version-bump command (VERSION is set)., type: string, default: "" }
+      git-user-name: { description: Committer of the release commit., type: string, default: "Release Bot" }
+      git-user-email: { description: Committer email of the release commit., type: string, default: "release-bot@users.noreply.github.com" }
+    secrets:
+      app-id: { required: false, description: GitHub App ID for releases past branch protection. }
+      app-private-key: { required: false, description: GitHub App private key. }
+    outputs:
+      version: { description: Released version (empty if nothing was released)., value: "${{ jobs.release.outputs.version }}" }
+      git-tag: { description: Released tag., value: "${{ jobs.release.outputs.git-tag }}" }
+      prerelease: { description: Whether the release is a pre-release., value: "${{ jobs.version.outputs.prerelease }}" }
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version
+    uses: ./.github/workflows/stage-version-detect.yml
+    secrets:
+      app-id: ${{ secrets.app-id }}
+      app-private-key: ${{ secrets.app-private-key }}
+
+  bump:
+    name: Bump
+    needs: version
+    if: needs.version.outputs.would-release == 'true'
+    uses: ./.github/workflows/stage-version-bump.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      replacements: ${{ inputs.replacements }}
+      bump-command: ${{ inputs.bump-command }}
+
+  release:
+    name: Release
+    needs: [version, bump]
+    uses: ./.github/workflows/stage-release-semantic.yml
+    permissions: { contents: write, issues: write, pull-requests: write }
+    with:
+      git-user-name: ${{ inputs.git-user-name }}
+      git-user-email: ${{ inputs.git-user-email }}
+      download-artifacts: false
+      restore-artifact: release-files
+      git-commit-files: ${{ needs.bump.outputs.files }}
+    secrets:
+      app-id: ${{ secrets.app-id }}
+      app-private-key: ${{ secrets.app-private-key }}

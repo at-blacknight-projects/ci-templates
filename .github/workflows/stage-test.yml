@@ -1,0 +1,243 @@
+name: Test (stage)
+
+# Installs the toolchain, then runs the install, lint, audit and test commands. Any
+# command left empty comes from the preset table in "Resolve presets". The test command
+# must leave a Cobertura report at coverage-file. That report is uploaded as the
+# `coverage` artifact, the only thing stage-coverage-report reads.
+#
+# Produces: `coverage` artifact (coverage.xml), when the test command wrote one.
+# Caller grants: contents: read.
+
+on:
+  workflow_call:
+    inputs:
+      toolchain:
+        description: 'go | rust | python | node | dotnet | none'
+        type: string
+        required: true
+      toolchain-version:
+        description: Toolchain version. Empty means toolchain-version-file, then the preset.
+        type: string
+        default: ""
+      toolchain-version-file:
+        description: File to read the version from (go.mod, .python-version, .nvmrc, global.json), relative to working-directory. Empty uses the preset.
+        type: string
+        default: ""
+      working-directory:
+        description: Directory the commands run in.
+        type: string
+        default: "."
+      install-command:
+        description: Installs dependencies. Empty uses the preset.
+        type: string
+        default: ""
+      lint:
+        description: Run the lint command.
+        type: boolean
+        default: true
+      lint-command:
+        description: Lints the code. Empty uses the preset.
+        type: string
+        default: ""
+      audit:
+        description: Run the dependency audit command (govulncheck, pip-audit, npm audit, …).
+        type: boolean
+        default: true
+      audit-command:
+        description: Audits dependencies for known vulnerabilities. Empty uses the preset.
+        type: string
+        default: ""
+      test-command:
+        description: Runs the tests and writes a Cobertura report to coverage-file. Empty uses the preset.
+        type: string
+        default: ""
+      coverage-file:
+        description: Where the test command writes its Cobertura report, relative to working-directory. Empty uses the preset.
+        type: string
+        default: ""
+    outputs:
+      has-coverage:
+        description: Whether a coverage report was uploaded (true/false).
+        value: ${{ jobs.test.outputs.has-coverage }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ inputs.toolchain }}
+    runs-on: ubuntu-latest
+    outputs:
+      has-coverage: ${{ steps.coverage.outputs.found }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The preset table: the one place per-toolchain defaults live. Any input the
+      # caller sets wins.
+      - name: Resolve presets
+        id: preset
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain }}
+          IN_VERSION: ${{ inputs.toolchain-version }}
+          IN_VERSION_FILE: ${{ inputs.toolchain-version-file }}
+          IN_INSTALL: ${{ inputs.install-command }}
+          IN_LINT: ${{ inputs.lint-command }}
+          IN_AUDIT: ${{ inputs.audit-command }}
+          IN_TEST: ${{ inputs.test-command }}
+          IN_COVERAGE: ${{ inputs.coverage-file }}
+        run: |
+          version="" ; version_file="" ; install="" ; lint="" ; audit="" ; test="" ; coverage="coverage.xml"
+
+          # Tool versions the presets pin. The annotations let Renovate keep them current.
+          # renovate: datasource=go depName=github.com/golangci/golangci-lint/v2
+          golangci_lint=v2.15.0
+          # renovate: datasource=go depName=github.com/boumenot/gocover-cobertura
+          gocover_cobertura=v1.5.0
+          # renovate: datasource=npm depName=c8
+          c8=10
+
+          # Commands are single-quoted on purpose: they expand when they run, not here.
+          # shellcheck disable=SC2016
+          case "$TOOLCHAIN" in
+            go)
+              version_file="go.mod"
+              install='go mod download && go mod verify'
+              lint="go vet ./... && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${golangci_lint} run"
+              audit='go run golang.org/x/vuln/cmd/govulncheck@latest ./...'
+              test="go test -race -covermode=atomic -coverprofile=coverage.out ./... && go run github.com/boumenot/gocover-cobertura@${gocover_cobertura} < coverage.out > coverage.xml"
+              ;;
+            rust)
+              if [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then version=""; else version="stable"; fi
+              install='cargo fetch --locked'
+              lint='cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings'
+              audit='cargo audit'
+              test='cargo llvm-cov --locked --cobertura --output-path coverage.xml'
+              ;;
+            python)
+              if [ -f .python-version ]; then version_file=".python-version"; else version="3.13"; fi
+              install='python -m pip install --upgrade pip && if [ -f pyproject.toml ]; then pip install -e ".[dev]"; elif [ -f requirements.txt ]; then pip install -r requirements.txt; fi'
+              lint='pipx run ruff check .'
+              audit='pipx run pip-audit'
+              test='python -m pytest --cov --cov-report=term-missing --cov-report=xml:coverage.xml'
+              ;;
+            node)
+              if [ -f .nvmrc ]; then version_file=".nvmrc"; else version="24"; fi
+              install='npm ci'
+              lint='npm run lint --if-present'
+              audit='npm audit --audit-level=high'
+              test="npx --yes c8@${c8} --reporter=cobertura --reporter=text --report-dir=. npm test"
+              coverage="cobertura-coverage.xml"
+              ;;
+            dotnet)
+              if [ -f global.json ]; then version_file="global.json"; else version="10.0.x"; fi
+              install='dotnet restore'
+              lint='dotnet format --verify-no-changes --no-restore'
+              audit='! dotnet list package --vulnerable --include-transitive | tee /dev/stderr | grep -q "has the following vulnerable packages"'
+              test='dotnet test --no-restore --collect:"XPlat Code Coverage" --results-directory ./TestResults && cp "$(find TestResults -name coverage.cobertura.xml | head -n1)" coverage.xml'
+              ;;
+            none) ;;
+            *) echo "::error::Unknown toolchain '$TOOLCHAIN' (go | rust | python | node | dotnet | none)"; exit 1 ;;
+          esac
+
+          # Caller inputs override the preset. An explicit version beats any version file.
+          if [ -n "$IN_VERSION" ]; then version="$IN_VERSION"; version_file="";
+          elif [ -n "$IN_VERSION_FILE" ]; then version=""; version_file="$IN_VERSION_FILE"; fi
+          [ -n "$version_file" ] && version_file="$PWD/$version_file"
+
+          multiline() { printf '%s<<__CMD__\n%s\n__CMD__\n' "$1" "$2"; }
+          {
+            echo "version=$version"
+            echo "version-file=$version_file"
+            echo "coverage=${IN_COVERAGE:-$coverage}"
+            multiline install "${IN_INSTALL:-$install}"
+            multiline lint "${IN_LINT:-$lint}"
+            multiline audit "${IN_AUDIT:-$audit}"
+            multiline test "${IN_TEST:-$test}"
+          } >> "$GITHUB_OUTPUT"
+
+      - if: inputs.toolchain == 'go'
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ steps.preset.outputs.version }}
+          go-version-file: ${{ steps.preset.outputs.version-file }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      # rust-toolchain.toml, when present, wins over the toolchain input (rustup's own rule).
+      - if: inputs.toolchain == 'rust'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.preset.outputs.version || 'stable' }}
+          components: clippy, rustfmt, llvm-tools-preview
+      - if: inputs.toolchain == 'rust'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-audit
+      - if: inputs.toolchain == 'python'
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.preset.outputs.version }}
+          python-version-file: ${{ steps.preset.outputs.version-file }}
+      - if: inputs.toolchain == 'node'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.preset.outputs.version }}
+          node-version-file: ${{ steps.preset.outputs.version-file }}
+      - if: inputs.toolchain == 'dotnet'
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.preset.outputs.version }}
+          global-json-file: ${{ steps.preset.outputs.version-file }}
+
+      - name: Install
+        id: install
+        if: steps.preset.outputs.install != ''
+        env:
+          CMD: ${{ steps.preset.outputs.install }}
+        run: bash -eo pipefail -c "$CMD"
+
+      # Lint, audit and test each run even if another failed, so one red check never
+      # hides the others' results; the job still fails if any of them did. Only a
+      # failed install stops them, since nothing can run without dependencies.
+      - name: Lint
+        if: ${{ !cancelled() && steps.install.outcome != 'failure' && inputs.lint && steps.preset.outputs.lint != '' }}
+        env:
+          CMD: ${{ steps.preset.outputs.lint }}
+        run: bash -eo pipefail -c "$CMD"
+
+      - name: Audit dependencies
+        if: ${{ !cancelled() && steps.install.outcome != 'failure' && inputs.audit && steps.preset.outputs.audit != '' }}
+        env:
+          CMD: ${{ steps.preset.outputs.audit }}
+        run: bash -eo pipefail -c "$CMD"
+
+      - name: Test
+        id: test
+        if: ${{ !cancelled() && steps.install.outcome != 'failure' && steps.preset.outputs.test != '' }}
+        env:
+          CMD: ${{ steps.preset.outputs.test }}
+        run: bash -eo pipefail -c "$CMD"
+
+      - name: Find coverage report
+        id: coverage
+        if: ${{ !cancelled() && steps.test.outcome == 'success' }}
+        env:
+          COVERAGE: ${{ steps.preset.outputs.coverage }}
+        run: |
+          if [ -s "$COVERAGE" ]; then
+            mkdir -p "$RUNNER_TEMP/coverage"
+            cp "$COVERAGE" "$RUNNER_TEMP/coverage/coverage.xml"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Cobertura report at $COVERAGE; skipping the coverage report."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload coverage
+        if: ${{ !cancelled() && steps.coverage.outputs.found == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: ${{ runner.temp }}/coverage/coverage.xml
+          retention-days: 90

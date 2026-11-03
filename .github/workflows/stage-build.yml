@@ -1,0 +1,331 @@
+name: Build (stage)
+
+# Compiles executables for each target platform and uploads them unsigned as
+# `binaries-<os>-<arch>`. Signing, archiving and checksums happen in stage-package, so
+# every toolchain shares that path.
+#
+# The build command (from the preset table or the caller) runs once per platform with
+# these environment variables:
+#   TARGET_OS, TARGET_ARCH   e.g. linux/amd64, darwin/arm64, windows/amd64
+#   NAME, VERSION            binary name, version being built
+#   OUTPUT_DIR               where to put the files that ship (absolute path)
+#   EXE_EXT                  ".exe" for windows, empty otherwise
+#   RUST_TARGET, DOTNET_RID  target triple / runtime identifier for those toolchains
+# It only has to leave files in OUTPUT_DIR.
+#
+# The preset also picks each platform's runner. Go and .NET cross-compile everything from
+# ubuntu. Rust and anything else native build darwin and windows on macOS and Windows
+# runners. Override per OS with `runners`.
+#
+# The per-toolchain setup steps mirror stage-test's. Change both together.
+#
+# Caller grants: contents: read.
+
+on:
+  workflow_call:
+    inputs:
+      toolchain:
+        description: 'go | rust | python | node | dotnet | none'
+        type: string
+        required: true
+      toolchain-version:
+        description: Toolchain version. Empty reads toolchain-version-file, then the preset.
+        type: string
+        default: ""
+      toolchain-version-file:
+        description: File to read the version from, relative to working-directory.
+        type: string
+        default: ""
+      working-directory:
+        description: Directory the build runs in.
+        type: string
+        default: "."
+      name:
+        description: Binary name. Empty uses the repository name.
+        type: string
+        default: ""
+      version:
+        description: Version to build. Empty (check builds) uses 0.0.0-dev+<short sha>.
+        type: string
+        default: ""
+      platforms:
+        description: Target platforms as os/arch, one per line or comma-separated. Empty uses the preset.
+        type: string
+        default: ""
+      runners:
+        description: 'JSON object overriding the runner per OS, e.g. {"darwin": "macos-15"}.'
+        type: string
+        default: "{}"
+      build-command:
+        description: Builds one platform into OUTPUT_DIR. Empty uses the preset (go, rust, dotnet).
+        type: string
+        default: ""
+      restore-artifact:
+        description: Artifact copied over the checkout first (release-files from stage-version-bump).
+        type: string
+        default: ""
+      go-ldflags:
+        description: "Go only: linker flags. {{version}} is replaced with the version."
+        type: string
+        default: "-s -w -X main.version={{version}}"
+      windows-resource:
+        description: "Go only: embed version info in Windows executables (goversioninfo)."
+        type: boolean
+        default: false
+      windows-company-name:
+        description: Company name for the Windows version resource.
+        type: string
+        default: ""
+      windows-product-name:
+        description: Product name for the Windows version resource. Empty uses name.
+        type: string
+        default: ""
+      windows-file-description:
+        description: File description for the Windows version resource. Empty uses name.
+        type: string
+        default: ""
+      windows-copyright:
+        description: Copyright for the Windows version resource. Empty uses the repository owner.
+        type: string
+        default: ""
+      retention-days:
+        description: How long the unsigned binaries are kept.
+        type: number
+        default: 5
+    outputs:
+      name:
+        description: Binary name used.
+        value: ${{ jobs.prepare.outputs.name }}
+      version:
+        description: Version built.
+        value: ${{ jobs.prepare.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      name: ${{ steps.plan.outputs.name }}
+      version: ${{ steps.plan.outputs.version }}
+      build-command: ${{ steps.plan.outputs.build-command }}
+    steps:
+      # The preset table: platforms, runners and build command per toolchain.
+      - name: Resolve presets and build matrix
+        id: plan
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain }}
+          IN_PLATFORMS: ${{ inputs.platforms }}
+          IN_RUNNERS: ${{ inputs.runners }}
+          IN_BUILD: ${{ inputs.build-command }}
+          IN_NAME: ${{ inputs.name }}
+          IN_VERSION: ${{ inputs.version }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          native='{"linux": "ubuntu-latest", "darwin": "macos-latest", "windows": "windows-latest"}'
+          linux_only='{"linux": "ubuntu-latest", "darwin": "ubuntu-latest", "windows": "ubuntu-latest"}'
+          # Build commands are single-quoted on purpose: they expand per platform, not here.
+          # shellcheck disable=SC2016
+          case "$TOOLCHAIN" in
+            go)
+              platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+              runners=$linux_only
+              build='CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" go build -trimpath -ldflags "$GO_LDFLAGS" -o "$OUTPUT_DIR/$NAME$EXE_EXT" .'
+              ;;
+            rust)
+              platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
+              runners='{"linux": "ubuntu-latest", "darwin": "macos-latest", "windows": "windows-latest"}'
+              build='rustup target add "$RUST_TARGET" && cargo build --release --locked --target "$RUST_TARGET" && cp "target/$RUST_TARGET/release/$NAME$EXE_EXT" "$OUTPUT_DIR/"'
+              ;;
+            dotnet)
+              platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+              runners=$linux_only
+              build='dotnet publish -c Release -r "$DOTNET_RID" --self-contained -p:PublishSingleFile=true -p:Version="${VERSION%%+*}" -o "$OUTPUT_DIR"'
+              ;;
+            python|node|none)
+              platforms="linux/amd64 darwin/arm64 windows/amd64"
+              runners=$native
+              build=""
+              ;;
+            *) echo "::error::Unknown toolchain '$TOOLCHAIN' (go | rust | python | node | dotnet | none)"; exit 1 ;;
+          esac
+
+          build="${IN_BUILD:-$build}"
+          if [ -z "$build" ]; then
+            echo "::error::toolchain '$TOOLCHAIN' has no build preset; set build-command (it receives TARGET_OS, TARGET_ARCH, OUTPUT_DIR, …)"
+            exit 1
+          fi
+          platforms=$(printf '%s' "${IN_PLATFORMS:-$platforms}" | tr ',\n' '  ')
+          runners=$(jq -c --argjson over "$IN_RUNNERS" '. + $over' <<< "$runners")
+          name="${IN_NAME:-$REPO_NAME}"
+          version="${IN_VERSION:-0.0.0-dev+${GITHUB_SHA::7}}"
+
+          matrix=$(for p in $platforms; do echo "$p"; done | jq -R -c --argjson runners "$runners" '
+            split("/") as [$os, $arch] |
+            {
+              os: $os, arch: $arch,
+              runner: ($runners[$os] // "ubuntu-latest"),
+              ext: (if $os == "windows" then ".exe" else "" end),
+              rust_target: ({
+                "linux/amd64": "x86_64-unknown-linux-gnu", "linux/arm64": "aarch64-unknown-linux-gnu",
+                "darwin/amd64": "x86_64-apple-darwin", "darwin/arm64": "aarch64-apple-darwin",
+                "windows/amd64": "x86_64-pc-windows-msvc", "windows/arm64": "aarch64-pc-windows-msvc"
+              }[$os + "/" + $arch] // ""),
+              dotnet_rid: ({"linux": "linux", "darwin": "osx", "windows": "win"}[$os] + "-" + ({"amd64": "x64", "arm64": "arm64", "386": "x86"}[$arch] // $arch))
+            }' | jq -s -c '{include: .}')
+          # Rust linux/arm64 builds natively on an arm runner rather than cross-linking.
+          if [ "$TOOLCHAIN" = rust ]; then
+            matrix=$(jq -c --argjson over "$IN_RUNNERS" '.include |= map(if .os == "linux" and .arch == "arm64" and ($over.linux == null) then .runner = "ubuntu-24.04-arm" else . end)' <<< "$matrix")
+          fi
+
+          {
+            echo "matrix=$matrix"
+            echo "name=$name"
+            echo "version=$version"
+            echo "build-command<<__CMD__"
+            echo "$build"
+            echo "__CMD__"
+          } >> "$GITHUB_OUTPUT"
+          jq . <<< "$matrix"
+
+  build:
+    name: ${{ matrix.os }}/${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download files to restore
+        if: inputs.restore-artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.restore-artifact }}
+          path: ${{ runner.temp }}/restore
+
+      - name: Restore files
+        if: inputs.restore-artifact != ''
+        working-directory: .
+        run: cp -av "$RUNNER_TEMP/restore/." .
+
+      - name: Resolve toolchain version
+        id: version
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain }}
+          IN_VERSION: ${{ inputs.toolchain-version }}
+          IN_VERSION_FILE: ${{ inputs.toolchain-version-file }}
+        run: |
+          version="" ; version_file=""
+          case "$TOOLCHAIN" in
+            go) version_file="go.mod" ;;
+            rust) [ -f rust-toolchain.toml ] || [ -f rust-toolchain ] || version="stable" ;;
+            python) if [ -f .python-version ]; then version_file=".python-version"; else version="3.13"; fi ;;
+            node) if [ -f .nvmrc ]; then version_file=".nvmrc"; else version="24"; fi ;;
+            dotnet) if [ -f global.json ]; then version_file="global.json"; else version="10.0.x"; fi ;;
+          esac
+          if [ -n "$IN_VERSION" ]; then version="$IN_VERSION"; version_file="";
+          elif [ -n "$IN_VERSION_FILE" ]; then version=""; version_file="$IN_VERSION_FILE"; fi
+          [ -n "$version_file" ] && version_file="$PWD/$version_file"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version-file=$version_file" >> "$GITHUB_OUTPUT"
+
+      # Toolchain setup: mirrors stage-test.
+      - if: inputs.toolchain == 'go'
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ steps.version.outputs.version }}
+          go-version-file: ${{ steps.version.outputs.version-file }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+      - if: inputs.toolchain == 'rust'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.version.outputs.version || 'stable' }}
+          targets: ${{ matrix.rust_target }}
+      - if: inputs.toolchain == 'python'
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.version.outputs.version }}
+          python-version-file: ${{ steps.version.outputs.version-file }}
+      - if: inputs.toolchain == 'node'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.version.outputs.version }}
+          node-version-file: ${{ steps.version.outputs.version-file }}
+      - if: inputs.toolchain == 'dotnet'
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.version.outputs.version }}
+          global-json-file: ${{ steps.version.outputs.version-file }}
+
+      # Go extra: Windows version resource (from atb-ci's stage-go-build-matrix).
+      - name: Create Windows version resource
+        if: inputs.toolchain == 'go' && inputs.windows-resource && matrix.os == 'windows'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          NAME: ${{ needs.prepare.outputs.name }}
+          COMPANY: ${{ inputs.windows-company-name }}
+          PRODUCT: ${{ inputs.windows-product-name || needs.prepare.outputs.name }}
+          DESCRIPTION: ${{ inputs.windows-file-description || needs.prepare.outputs.name }}
+          COPYRIGHT: ${{ inputs.windows-copyright || format('Copyright (c) {0}', github.repository_owner) }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          core="${VERSION#v}"; core="${core%%[-+]*}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$core"
+          jq -n --arg v "$VERSION" --arg name "$NAME" --arg company "$COMPANY" --arg product "$PRODUCT" \
+                --arg desc "$DESCRIPTION" --arg copy "$COPYRIGHT" \
+                --argjson major "${MAJOR:-0}" --argjson minor "${MINOR:-0}" --argjson patch "${PATCH:-0}" '{
+            FixedFileInfo: {
+              FileVersion: {Major: $major, Minor: $minor, Patch: $patch, Build: 0},
+              ProductVersion: {Major: $major, Minor: $minor, Patch: $patch, Build: 0},
+              FileFlagsMask: "3f", FileFlags: "00", FileOS: "040004", FileType: "01", FileSubType: "00"
+            },
+            StringFileInfo: {
+              CompanyName: $company, FileDescription: $desc, FileVersion: $v, InternalName: $name,
+              LegalCopyright: $copy, OriginalFilename: ($name + ".exe"), ProductName: $product, ProductVersion: $v
+            },
+            VarFileInfo: {Translation: {LangID: "0409", CharsetID: "04B0"}}
+          }' > versioninfo.json
+          arch_flag=""
+          [ "$TARGET_ARCH" = arm64 ] && arch_flag="-arm=true -64=true"
+          [ "$TARGET_ARCH" = amd64 ] && arch_flag="-64=true"
+          # shellcheck disable=SC2086 # arch_flag is zero or more flags
+          "$(go env GOPATH)/bin/goversioninfo" $arch_flag
+
+      - name: Build
+        env:
+          CMD: ${{ needs.prepare.outputs.build-command }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          EXE_EXT: ${{ matrix.ext }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+          DOTNET_RID: ${{ matrix.dotnet_rid }}
+          NAME: ${{ needs.prepare.outputs.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GO_LDFLAGS_TEMPLATE: ${{ inputs.go-ldflags }}
+        run: |
+          export OUTPUT_DIR="$RUNNER_TEMP/out"
+          mkdir -p "$OUTPUT_DIR"
+          export GO_LDFLAGS="${GO_LDFLAGS_TEMPLATE//\{\{version\}\}/$VERSION}"
+          bash -eo pipefail -c "$CMD"
+          if [ -z "$(ls -A "$OUTPUT_DIR")" ]; then
+            echo "::error::The build command left nothing in OUTPUT_DIR"
+            exit 1
+          fi
+          ls -l "$OUTPUT_DIR"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error

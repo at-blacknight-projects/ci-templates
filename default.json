@@ -1,0 +1,70 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Shared Renovate policy for repos using ci-templates. Enable with {\"extends\": [\"github>at-blacknight-projects/ci-templates\"]}.",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":semanticCommitTypeAll(chore)",
+    ":semanticCommitScope(deps)",
+    "github>at-blacknight-projects/ci-templates:annotations"
+  ],
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 10,
+  "labels": ["dependencies"],
+  "vulnerabilityAlerts": {
+    "labels": ["dependencies", "security"],
+    "schedule": ["at any time"],
+    "semanticCommitType": "fix"
+  },
+  "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
+  "packageRules": [
+    {
+      "description": "Runtime dependencies change what ships, so they are fix(deps) and semantic-release cuts a patch release. Everything else (CI, tooling) stays chore(deps) and releases nothing.",
+      "matchDepTypes": ["require", "dependencies", "toolchain"],
+      "semanticCommitType": "fix"
+    },
+    {
+      "description": "Container base images ship too.",
+      "matchManagers": ["dockerfile"],
+      "semanticCommitType": "fix"
+    },
+    {
+      "description": "The go directive is a minimum, not a pin; only the toolchain line moves.",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["golang"],
+      "enabled": false
+    },
+    {
+      "description": "Keep the Go toolchain line and the golang builder image on the same patch: official golang images set GOTOOLCHAIN=local, so go.mod alone can't raise the version an image builds with.",
+      "matchDepNames": ["go", "golang"],
+      "groupName": "Go toolchain"
+    },
+    {
+      "description": "Group non-major GitHub Actions updates into one PR.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Group non-major Go module updates into one PR.",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["require", "indirect"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "Go modules"
+    },
+    {
+      "description": "Merge non-major CI tooling updates on their own once the checks pass.",
+      "matchManagers": ["github-actions", "custom.regex"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "Majors always need a human.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major"]
+    }
+  ]
+}
