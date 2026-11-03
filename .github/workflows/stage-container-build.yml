@@ -156,9 +156,9 @@ jobs:
         with:
           images: ${{ steps.image.outputs.ref }}
           tags: |
-            type=raw,value=${{ inputs.version }},enable=${{ inputs.publish && inputs.version != '' }}
+            type=raw,value=${{ inputs.version || 'unversioned' }},enable=${{ inputs.publish && inputs.version != '' }}
             type=raw,value=latest,enable=${{ inputs.publish && inputs.version != '' && !inputs.prerelease }}
-            type=raw,value=${{ inputs.channel }},enable=${{ inputs.publish && inputs.prerelease && inputs.channel != '' }}
+            type=raw,value=${{ inputs.channel || 'no-channel' }},enable=${{ inputs.publish && inputs.prerelease && inputs.channel != '' }}
             type=sha,format=long
             type=ref,event=pr
 
