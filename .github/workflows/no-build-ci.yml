@@ -1,0 +1,37 @@
+name: No-build CI
+
+# Public API for repos with nothing to build (config, docs, workflow repos): PR title and
+# the security scan. Wiring only; see CLAUDE.md.
+#
+#   on: { pull_request: {}, push: { branches: [main] } }
+#   permissions: { contents: read, pull-requests: read, security-events: write }
+#   jobs:
+#     ci:
+#       uses: at-blacknight-projects/ci-templates/.github/workflows/no-build-ci.yml@v1
+
+on:
+  workflow_call:
+    inputs:
+      pr-title: { description: Check PR titles are conventional commits., type: boolean, default: true }
+      security-scan: { description: Run the Trivy filesystem scan., type: boolean, default: true }
+      security-severity: { description: Severities that fail the scan., type: string, default: "CRITICAL,HIGH" }
+      sarif: { description: Upload findings to the Security tab., type: boolean, default: true }
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    name: PR
+    if: github.event_name == 'pull_request' && inputs.pr-title
+    uses: ./.github/workflows/stage-pr-checks.yml
+    permissions: { contents: read, pull-requests: read }
+
+  security:
+    name: Security
+    if: inputs.security-scan
+    uses: ./.github/workflows/stage-security-scan.yml
+    permissions: { contents: read, security-events: write }
+    with:
+      severity: ${{ inputs.security-severity }}
+      sarif: ${{ inputs.sarif }}

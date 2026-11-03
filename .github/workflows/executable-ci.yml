@@ -1,0 +1,119 @@
+name: Executable CI
+
+# Public API for repos that ship binaries/CLIs: PR title, tests and coverage, security
+# scan, and a check build of every release platform (unsigned archives kept as artifacts).
+# Wiring only; see CLAUDE.md.
+#
+#   on: { pull_request: {}, push: { branches: [main] } }
+#   permissions: { contents: read, actions: read, pull-requests: write, security-events: write }
+#   jobs:
+#     ci:
+#       uses: at-blacknight-projects/ci-templates/.github/workflows/executable-ci.yml@v1
+#       with: { toolchain: go }
+
+on:
+  workflow_call:
+    inputs:
+      toolchain: { description: 'go | rust | python | node | dotnet | none', type: string, required: true }
+      toolchain-version: { description: "Toolchain version. Empty reads toolchain-version-file, then the preset.", type: string, default: "" }
+      toolchain-version-file: { description: File to read the toolchain version from., type: string, default: "" }
+      working-directory: { description: Directory the project commands run in., type: string, default: "." }
+      install-command: { description: Override the preset install command., type: string, default: "" }
+      lint: { description: Run the lint command., type: boolean, default: true }
+      lint-command: { description: Override the preset lint command., type: string, default: "" }
+      audit: { description: Run the dependency audit command., type: boolean, default: true }
+      audit-command: { description: Override the preset audit command., type: string, default: "" }
+      test-command: { description: Override the preset test command (must write Cobertura to coverage-file)., type: string, default: "" }
+      coverage-file: { description: Override where the Cobertura report is written., type: string, default: "" }
+      coverage-threshold: { description: Minimum line coverage in percent; 0 disables the gate., type: number, default: 0 }
+      coverage-healthy: { description: Line coverage shown as healthy., type: number, default: 80 }
+      coverage-comment: { description: Comment coverage on PRs., type: boolean, default: true }
+      pr-title: { description: Check PR titles are conventional commits., type: boolean, default: true }
+      security-scan: { description: Run the Trivy filesystem scan., type: boolean, default: true }
+      security-severity: { description: Severities that fail the scan., type: string, default: "CRITICAL,HIGH" }
+      sarif: { description: Upload findings to the Security tab., type: boolean, default: true }
+      name: { description: Binary name. Empty uses the repository name., type: string, default: "" }
+      platforms: { description: Target platforms (os/arch). Empty uses the toolchain preset., type: string, default: "" }
+      runners: { description: JSON object overriding the runner per OS., type: string, default: "{}" }
+      build-command: { description: Override the preset build command (fills OUTPUT_DIR)., type: string, default: "" }
+      go-ldflags: { description: "Go only: linker flags; {{version}} is replaced.", type: string, default: "-s -w -X main.version={{version}}" }
+      windows-resource: { description: "Go only: embed Windows version info.", type: boolean, default: false }
+      windows-company-name: { description: Windows version info company., type: string, default: "" }
+      windows-product-name: { description: Windows version info product., type: string, default: "" }
+      windows-file-description: { description: Windows version info description., type: string, default: "" }
+      windows-copyright: { description: Windows version info copyright., type: string, default: "" }
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    name: PR
+    if: github.event_name == 'pull_request' && inputs.pr-title
+    uses: ./.github/workflows/stage-pr-checks.yml
+    permissions: { contents: read, pull-requests: read }
+
+  test:
+    name: Test
+    uses: ./.github/workflows/stage-test.yml
+    with:
+      toolchain: ${{ inputs.toolchain }}
+      toolchain-version: ${{ inputs.toolchain-version }}
+      toolchain-version-file: ${{ inputs.toolchain-version-file }}
+      working-directory: ${{ inputs.working-directory }}
+      install-command: ${{ inputs.install-command }}
+      lint: ${{ inputs.lint }}
+      lint-command: ${{ inputs.lint-command }}
+      audit: ${{ inputs.audit }}
+      audit-command: ${{ inputs.audit-command }}
+      test-command: ${{ inputs.test-command }}
+      coverage-file: ${{ inputs.coverage-file }}
+
+  coverage:
+    name: Coverage
+    needs: test
+    if: needs.test.outputs.has-coverage == 'true'
+    uses: ./.github/workflows/stage-coverage-report.yml
+    permissions: { contents: read, actions: read, pull-requests: write }
+    with:
+      threshold: ${{ inputs.coverage-threshold }}
+      healthy: ${{ inputs.coverage-healthy }}
+      comment: ${{ inputs.coverage-comment }}
+
+  security:
+    name: Security
+    if: inputs.security-scan
+    uses: ./.github/workflows/stage-security-scan.yml
+    permissions: { contents: read, security-events: write }
+    with:
+      severity: ${{ inputs.security-severity }}
+      sarif: ${{ inputs.sarif }}
+
+  build:
+    name: Build
+    uses: ./.github/workflows/stage-build.yml
+    with:
+      toolchain: ${{ inputs.toolchain }}
+      toolchain-version: ${{ inputs.toolchain-version }}
+      toolchain-version-file: ${{ inputs.toolchain-version-file }}
+      working-directory: ${{ inputs.working-directory }}
+      name: ${{ inputs.name }}
+      platforms: ${{ inputs.platforms }}
+      runners: ${{ inputs.runners }}
+      build-command: ${{ inputs.build-command }}
+      go-ldflags: ${{ inputs.go-ldflags }}
+      windows-resource: ${{ inputs.windows-resource }}
+      windows-company-name: ${{ inputs.windows-company-name }}
+      windows-product-name: ${{ inputs.windows-product-name }}
+      windows-file-description: ${{ inputs.windows-file-description }}
+      windows-copyright: ${{ inputs.windows-copyright }}
+
+  package:
+    name: Package
+    needs: build
+    uses: ./.github/workflows/stage-package.yml
+    permissions: { contents: read, id-token: write, attestations: write }
+    with:
+      name: ${{ needs.build.outputs.name }}
+      version: ${{ needs.build.outputs.version }}
+      publish: false

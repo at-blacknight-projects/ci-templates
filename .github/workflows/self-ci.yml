@@ -1,0 +1,33 @@
+name: Self CI
+
+# This repo's own checks: actionlint (with shellcheck, which the runner image has) over
+# every workflow, plus no-build-ci for the PR title and security scan.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12 "$RUNNER_TEMP"
+      - name: Lint workflows
+        run: |
+          echo "::add-matcher::.github/actionlint-matcher.json"
+          "$RUNNER_TEMP/actionlint" -color
+
+  checks:
+    name: Checks
+    uses: ./.github/workflows/no-build-ci.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write

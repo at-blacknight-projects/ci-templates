@@ -1,0 +1,155 @@
+name: Executable release
+
+# Public API for repos that ship binaries/CLIs. On a push to a release branch:
+# version → bump → build every platform → sign (bring your own) + archive → tag and
+# GitHub release with the archives attached. The tag is created last. Wiring only; see
+# CLAUDE.md.
+#
+#   on: { push: { branches: [main, alpha] } }
+#   permissions: { contents: write, issues: write, pull-requests: write, id-token: write, attestations: write }
+#   jobs:
+#     release:
+#       uses: at-blacknight-projects/ci-templates/.github/workflows/executable-release.yml@v1
+#       with: { toolchain: go }
+#       secrets:
+#         app-id: ${{ secrets.RELEASE_APP_ID }}
+#         app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+#         windows-pfx-base64: ${{ secrets.WINDOWS_PFX }}         # optional signing
+#         windows-pfx-password: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+
+on:
+  workflow_call:
+    inputs:
+      toolchain: { description: 'go | rust | python | node | dotnet | none', type: string, required: true }
+      toolchain-version: { description: Toolchain version., type: string, default: "" }
+      toolchain-version-file: { description: File to read the toolchain version from., type: string, default: "" }
+      working-directory: { description: Directory the build runs in., type: string, default: "." }
+      name: { description: Binary name. Empty uses the repository name., type: string, default: "" }
+      platforms: { description: Target platforms (os/arch). Empty uses the toolchain preset., type: string, default: "" }
+      runners: { description: JSON object overriding the runner per OS., type: string, default: "{}" }
+      build-command: { description: Override the preset build command (fills OUTPUT_DIR)., type: string, default: "" }
+      go-ldflags: { description: "Go only: linker flags; {{version}} is replaced.", type: string, default: "-s -w -X main.version={{version}}" }
+      windows-resource: { description: "Go only: embed Windows version info.", type: boolean, default: false }
+      windows-company-name: { description: Windows version info company., type: string, default: "" }
+      windows-product-name: { description: Windows version info product., type: string, default: "" }
+      windows-file-description: { description: Windows version info description., type: string, default: "" }
+      windows-copyright: { description: Windows version info copyright., type: string, default: "" }
+      replacements: { description: 'JSON array of {"file", "pattern", "replacement"} version edits.', type: string, default: "[]" }
+      bump-command: { description: Extra version-bump command (VERSION is set)., type: string, default: "" }
+      environment: { description: GitHub environment for the signing job (protection rules + secrets; needs secrets inherit)., type: string, default: "" }
+      windows-sign-provider: { description: "pkcs12 | trusted-signing | key-vault (empty: pkcs12 when a PFX is passed).", type: string, default: "" }
+      windows-keystore: { description: "trusted-signing endpoint host or key-vault name.", type: string, default: "" }
+      windows-alias: { description: "trusted-signing account/profile or key-vault certificate.", type: string, default: "" }
+      windows-timestamp-url: { description: RFC 3161 timestamp server., type: string, default: "http://timestamp.digicert.com" }
+      windows-description: { description: Signed description. Empty uses name., type: string, default: "" }
+      windows-url: { description: Signed URL. Empty uses the repository URL., type: string, default: "" }
+      azure-client-id: { description: Entra app for trusted-signing / key-vault (OIDC)., type: string, default: "" }
+      azure-tenant-id: { description: Entra tenant for trusted-signing / key-vault., type: string, default: "" }
+      sigstore: { description: Keyless Sigstore signature over SHA256SUMS., type: boolean, default: true }
+      attest: { description: Build-provenance attestations for the archives., type: boolean, default: true }
+      git-user-name: { description: Committer of the release commit., type: string, default: "Release Bot" }
+      git-user-email: { description: Committer email of the release commit., type: string, default: "release-bot@users.noreply.github.com" }
+    secrets:
+      app-id: { required: false, description: GitHub App ID for releases past branch protection. }
+      app-private-key: { required: false, description: GitHub App private key. }
+      windows-pfx-base64: { required: false, description: Base64 .pfx for Windows signing. }
+      windows-pfx-password: { required: false, description: .pfx password. }
+      macos-p12-base64: { required: false, description: Base64 Developer ID .p12. }
+      macos-p12-password: { required: false, description: .p12 password. }
+      apple-api-issuer-id: { required: false, description: App Store Connect API issuer (notarization). }
+      apple-api-key-id: { required: false, description: App Store Connect API key ID. }
+      apple-api-key-p8: { required: false, description: App Store Connect API private key. }
+      gpg-private-key: { required: false, description: GPG key for SHA256SUMS.asc. }
+      gpg-passphrase: { required: false, description: GPG passphrase. }
+    outputs:
+      version: { description: Released version (empty if nothing was released)., value: "${{ jobs.release.outputs.version }}" }
+      git-tag: { description: Released tag., value: "${{ jobs.release.outputs.git-tag }}" }
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version
+    uses: ./.github/workflows/stage-version-detect.yml
+    secrets:
+      app-id: ${{ secrets.app-id }}
+      app-private-key: ${{ secrets.app-private-key }}
+
+  bump:
+    name: Bump
+    needs: version
+    if: needs.version.outputs.would-release == 'true'
+    uses: ./.github/workflows/stage-version-bump.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      replacements: ${{ inputs.replacements }}
+      bump-command: ${{ inputs.bump-command }}
+
+  build:
+    name: Build
+    needs: [version, bump]
+    uses: ./.github/workflows/stage-build.yml
+    with:
+      toolchain: ${{ inputs.toolchain }}
+      toolchain-version: ${{ inputs.toolchain-version }}
+      toolchain-version-file: ${{ inputs.toolchain-version-file }}
+      working-directory: ${{ inputs.working-directory }}
+      name: ${{ inputs.name }}
+      version: ${{ needs.version.outputs.version }}
+      platforms: ${{ inputs.platforms }}
+      runners: ${{ inputs.runners }}
+      build-command: ${{ inputs.build-command }}
+      restore-artifact: release-files
+      go-ldflags: ${{ inputs.go-ldflags }}
+      windows-resource: ${{ inputs.windows-resource }}
+      windows-company-name: ${{ inputs.windows-company-name }}
+      windows-product-name: ${{ inputs.windows-product-name }}
+      windows-file-description: ${{ inputs.windows-file-description }}
+      windows-copyright: ${{ inputs.windows-copyright }}
+
+  package:
+    name: Sign and package
+    needs: build
+    uses: ./.github/workflows/stage-package.yml
+    permissions: { contents: read, id-token: write, attestations: write }
+    with:
+      name: ${{ needs.build.outputs.name }}
+      version: ${{ needs.build.outputs.version }}
+      publish: true
+      environment: ${{ inputs.environment }}
+      windows-sign-provider: ${{ inputs.windows-sign-provider }}
+      windows-keystore: ${{ inputs.windows-keystore }}
+      windows-alias: ${{ inputs.windows-alias }}
+      windows-timestamp-url: ${{ inputs.windows-timestamp-url }}
+      windows-description: ${{ inputs.windows-description }}
+      windows-url: ${{ inputs.windows-url }}
+      azure-client-id: ${{ inputs.azure-client-id }}
+      azure-tenant-id: ${{ inputs.azure-tenant-id }}
+      sigstore: ${{ inputs.sigstore }}
+      attest: ${{ inputs.attest }}
+    secrets:
+      windows-pfx-base64: ${{ secrets.windows-pfx-base64 }}
+      windows-pfx-password: ${{ secrets.windows-pfx-password }}
+      macos-p12-base64: ${{ secrets.macos-p12-base64 }}
+      macos-p12-password: ${{ secrets.macos-p12-password }}
+      apple-api-issuer-id: ${{ secrets.apple-api-issuer-id }}
+      apple-api-key-id: ${{ secrets.apple-api-key-id }}
+      apple-api-key-p8: ${{ secrets.apple-api-key-p8 }}
+      gpg-private-key: ${{ secrets.gpg-private-key }}
+      gpg-passphrase: ${{ secrets.gpg-passphrase }}
+
+  release:
+    name: Release
+    needs: [version, bump, package]
+    uses: ./.github/workflows/stage-release-semantic.yml
+    permissions: { contents: write, issues: write, pull-requests: write }
+    with:
+      git-user-name: ${{ inputs.git-user-name }}
+      git-user-email: ${{ inputs.git-user-email }}
+      artifact-pattern: build-release
+      restore-artifact: release-files
+      git-commit-files: ${{ needs.bump.outputs.files }}
+    secrets:
+      app-id: ${{ secrets.app-id }}
+      app-private-key: ${{ secrets.app-private-key }}

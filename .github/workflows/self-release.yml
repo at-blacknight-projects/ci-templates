@@ -1,0 +1,60 @@
+name: Self release
+
+# Releases this repo with its own no-build-release, then points the major tag (v1, v2,
+# …) at the new stable release. That moving tag is what consumers pin.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    uses: ./.github/workflows/no-build-release.yml
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    secrets:
+      app-id: ${{ secrets.RELEASE_APP_ID }}
+      app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  major-tag:
+    name: Move major tag
+    needs: release
+    if: needs.release.outputs.git-tag != '' && needs.release.outputs.prerelease != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check for a GitHub App
+        id: app
+        env:
+          APP_ID: ${{ secrets.RELEASE_APP_ID }}
+        run: echo "enabled=$([ -n "$APP_ID" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        if: steps.app.outputs.enabled == 'true'
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+      - name: Point the major tag at the release
+        env:
+          TAG: ${{ needs.release.outputs.git-tag }}
+        run: |
+          git fetch --tags --force
+          major="${TAG%%.*}"
+          git tag -f "$major" "${TAG}^{commit}"
+          git push -f origin "refs/tags/$major"
+          echo "$major -> $TAG" >> "$GITHUB_STEP_SUMMARY"

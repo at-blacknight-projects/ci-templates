@@ -1,0 +1,95 @@
+name: Container CI
+
+# Public API for repos that ship container images: PR title, tests and coverage (any
+# toolchain, or none), security scan, and a check build + Trivy scan of every image
+# (not pushed). Wiring only; see CLAUDE.md.
+#
+#   on: { pull_request: {}, push: { branches: [main] } }
+#   permissions: { contents: read, actions: read, pull-requests: write, security-events: write, packages: read }
+#   jobs:
+#     ci:
+#       uses: at-blacknight-projects/ci-templates/.github/workflows/container-ci.yml@v1
+#       with:
+#         toolchain: go
+#         images: '[{"name": "", "context": ".", "file": "Dockerfile"}]'
+
+on:
+  workflow_call:
+    inputs:
+      test: { description: Run stage-test (false for image-only repos)., type: boolean, default: true }
+      toolchain: { description: 'go | rust | python | node | dotnet | none', type: string, default: none }
+      toolchain-version: { description: "Toolchain version. Empty reads toolchain-version-file, then the preset.", type: string, default: "" }
+      toolchain-version-file: { description: File to read the toolchain version from., type: string, default: "" }
+      working-directory: { description: Directory the project commands run in., type: string, default: "." }
+      install-command: { description: Override the preset install command., type: string, default: "" }
+      lint: { description: Run the lint command., type: boolean, default: true }
+      lint-command: { description: Override the preset lint command., type: string, default: "" }
+      audit: { description: Run the dependency audit command., type: boolean, default: true }
+      audit-command: { description: Override the preset audit command., type: string, default: "" }
+      test-command: { description: Override the preset test command (must write Cobertura to coverage-file)., type: string, default: "" }
+      coverage-file: { description: Override where the Cobertura report is written., type: string, default: "" }
+      coverage-threshold: { description: Minimum line coverage in percent; 0 disables the gate., type: number, default: 0 }
+      coverage-healthy: { description: Line coverage shown as healthy., type: number, default: 80 }
+      coverage-comment: { description: Comment coverage on PRs., type: boolean, default: true }
+      pr-title: { description: Check PR titles are conventional commits., type: boolean, default: true }
+      security-scan: { description: Run the Trivy filesystem scan., type: boolean, default: true }
+      security-severity: { description: Severities that fail the scans., type: string, default: "CRITICAL,HIGH" }
+      sarif: { description: Upload findings to the Security tab., type: boolean, default: true }
+      images: { description: 'JSON array of images (see stage-container-build).', type: string, default: '[{"name": "", "context": "."}]' }
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    name: PR
+    if: github.event_name == 'pull_request' && inputs.pr-title
+    uses: ./.github/workflows/stage-pr-checks.yml
+    permissions: { contents: read, pull-requests: read }
+
+  test:
+    name: Test
+    if: inputs.test
+    uses: ./.github/workflows/stage-test.yml
+    with:
+      toolchain: ${{ inputs.toolchain }}
+      toolchain-version: ${{ inputs.toolchain-version }}
+      toolchain-version-file: ${{ inputs.toolchain-version-file }}
+      working-directory: ${{ inputs.working-directory }}
+      install-command: ${{ inputs.install-command }}
+      lint: ${{ inputs.lint }}
+      lint-command: ${{ inputs.lint-command }}
+      audit: ${{ inputs.audit }}
+      audit-command: ${{ inputs.audit-command }}
+      test-command: ${{ inputs.test-command }}
+      coverage-file: ${{ inputs.coverage-file }}
+
+  coverage:
+    name: Coverage
+    needs: test
+    if: needs.test.outputs.has-coverage == 'true'
+    uses: ./.github/workflows/stage-coverage-report.yml
+    permissions: { contents: read, actions: read, pull-requests: write }
+    with:
+      threshold: ${{ inputs.coverage-threshold }}
+      healthy: ${{ inputs.coverage-healthy }}
+      comment: ${{ inputs.coverage-comment }}
+
+  security:
+    name: Security
+    if: inputs.security-scan
+    uses: ./.github/workflows/stage-security-scan.yml
+    permissions: { contents: read, security-events: write }
+    with:
+      severity: ${{ inputs.security-severity }}
+      sarif: ${{ inputs.sarif }}
+
+  image:
+    name: Image
+    uses: ./.github/workflows/stage-container-build.yml
+    permissions: { contents: read, packages: write, id-token: write, attestations: write, security-events: write }
+    with:
+      images: ${{ inputs.images }}
+      publish: false
+      scan-severity: ${{ inputs.security-severity }}
+      sarif: ${{ inputs.sarif }}
