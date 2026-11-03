@@ -1,3 +1,9 @@
+## [0.4.1](https://github.com/at-blacknight-projects/ci-templates/compare/v0.4.0...v0.4.1) (2026-11-03)
+
+### Bug Fixes
+
+* drop the trailing dash from image cache scope and scan category ([9e65f9b](https://github.com/at-blacknight-projects/ci-templates/commit/9e65f9b9785b93c46d4fbbba5a87de9ab5ba3160))
+
 ## [0.4.0](https://github.com/at-blacknight-projects/ci-templates/compare/v0.3.0...v0.4.0) (2026-11-03)
 
 ### Features
