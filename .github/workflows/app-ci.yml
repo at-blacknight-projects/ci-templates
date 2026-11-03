@@ -35,6 +35,8 @@ on:
       security-severity: { description: Severities that fail the scans., type: string, default: "CRITICAL,HIGH" }
       sarif: { description: Upload findings to the Security tab., type: boolean, default: true }
       images: { description: 'JSON array of images (see stage-container-build).', type: string, default: '[{"name": "", "context": "."}]' }
+      default-platforms: { description: Platforms for images that don't set their own., type: string, default: "linux/amd64,linux/arm64" }
+      check-platforms: { description: "Build every release platform in the check build, not only the scanned linux/amd64 copy.", type: boolean, default: true }
       charts: { description: "Chart directories, one per line. Empty finds every Chart.yaml.", type: string, default: "" }
       kubernetes-version: { description: Kubernetes version rendered charts are validated against., type: string, default: "1.33.0" }
 
@@ -92,6 +94,8 @@ jobs:
     with:
       images: ${{ inputs.images }}
       publish: false
+      default-platforms: ${{ inputs.default-platforms }}
+      check-platforms: ${{ inputs.check-platforms }}
       scan-severity: ${{ inputs.security-severity }}
       sarif: ${{ inputs.sarif }}
 
