@@ -1,3 +1,9 @@
+## [0.2.0](https://github.com/at-blacknight-projects/ci-templates/compare/v0.1.1...v0.2.0) (2026-11-03)
+
+### Features
+
+* publish to a chart index with a GitHub App token ([d85ba84](https://github.com/at-blacknight-projects/ci-templates/commit/d85ba84b97ded80c642f9d356d14c7cde2217371))
+
 ## [0.1.1](https://github.com/at-blacknight-projects/ci-templates/compare/v0.1.0...v0.1.1) (2026-11-03)
 
 ### Bug Fixes
