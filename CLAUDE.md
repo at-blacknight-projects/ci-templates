@@ -6,47 +6,88 @@ repo, including ones outside this org, calls them with
 
 ## The one rule: shared stages, thin project types
 
-Every project type (Go, Python, container-only, Helm-only, no-build) goes through the
-**same pipeline shape**, built from the **same shared stages**. A fix to a shared stage
-must fix every project type at once. If you're about to write the same logic in two
-places, it belongs in a stage.
+There are two layers:
+
+- **Stages** (`stage-*.yml`) do the work. They don't know which language or project
+  type they're serving, so a fix to a stage fixes every project type at once.
+- **Project types** are the public API. There is one pair per *kind of thing a repo
+  ships*, and each pair only lists the stages that kind needs. A container service never
+  sees Helm inputs, and a CLI never sees image inputs.
+
+Project types are about what's shipped, not the language. The language is always just
+the `toolchain` input. If you're about to write the same logic in two places, or a second
+copy of a stage for another language or type, stop: it belongs in the existing stage.
+
+| Project type | Ships | `*-ci.yml` (PRs, pushes) | `*-release.yml` (release branches) |
+| --- | --- | --- | --- |
+| `executable` | binaries / CLIs | pr-checks, test, coverage, security, build (check) | version → bump → build → release with archives |
+| `container` | an image | pr-checks, test, coverage, security, container-build (check) | version → bump → container-build → release |
+| `app` | image + Helm chart | `container` + helm-lint | version → bump → container-build → helm-package → release |
+| `helm` | Helm chart(s) only | pr-checks, helm-lint | version → bump → helm-package → release |
+| `no-build` | nothing (config, docs, this repo) | pr-checks | version → bump → release |
+
+"(check)" means the stage runs with `publish: false`. It builds everything a release
+would (every platform, every image) but publishes nothing, so a PR proves the release
+would build. Executable check builds are kept as short-lived artifacts for testing.
+
+The stages:
 
 ```
-CI (PRs and pushes)
-  stage-pr-checks          shared   PR title / conventional commits
-  stage-<lang>-test        per-lang lint, test, coverage → coverage-summary.json
-  stage-coverage-report    shared   summary, base-branch delta, PR comment, threshold
-  stage-security-scan      shared   Trivy filesystem scan (gate + SARIF)
-  stage-helm-lint          shared   only when the repo has charts
-
-Release (push to a release branch)
-  stage-version-detect     shared   semantic-release dry run → version, channel
-  stage-version-bump       shared   writes the version into files → release-files artifact
-  stage-<lang>-build       per-lang binaries (e.g. stage-go-build-matrix) → build-* artifacts
-  stage-container-build    shared   build → scan → push → sign images
-  stage-helm-package       shared   bump, package, publish charts (after images)
-  stage-release-semantic   shared   tag, GitHub release, changelog commit: ALWAYS LAST
+  stage-pr-checks          PR title follows conventional commits            (PRs only)
+  stage-test               toolchain setup → install → lint → audit → test → coverage.xml
+  stage-coverage-report    summary, base-branch delta, sticky PR comment, threshold
+  stage-security-scan      Trivy filesystem scan: gate + SARIF
+  stage-helm-lint          lint, render, kubeconform
+  stage-version-detect     semantic-release dry run → version, channel, prerelease
+  stage-version-bump       writes the version into files → release-files
+  stage-build              per platform: build → archive + checksum      (publish: false = check)
+  stage-container-build    build → scan → push → sign                    (publish: false = check)
+  stage-helm-package       package + publish charts, after images
+  stage-release-semantic   tag, GitHub release, changelog commit         ALWAYS LAST
 ```
 
-`<type>-ci.yml` and `<type>-release.yml` are the public API. They only **wire stages
-together**, mapping their inputs onto stage inputs and passing outputs along. They contain
-no `run:` logic of their own. If a project-type workflow needs a step, add it to the
-right stage (or make a new stage) and call that.
+Project-type workflows only **wire stages together**: they map inputs onto stages and
+pass outputs along, with no `run:` logic of their own. A new project type is a new
+combination of existing stages. If it needs a step no stage has, add a stage that any
+type could use.
 
-Per-language stages do only the language-specific part and hand off through the
-**artifact contracts** below. Everything downstream of a contract is shared.
+### Toolchains, not languages
+
+Only two things differ between languages: **installing the toolchain** and **the
+commands**. Each stage that runs project code takes a `toolchain` input
+(`go | rust | python | node | dotnet | none`):
+
+- **Setup:** there is one conditional setup step per toolchain (`actions/setup-go`,
+  `dtolnay/rust-toolchain`, `setup-python`, `setup-node`, `setup-dotnet`), and that is
+  the only per-language branch allowed in a stage. Supporting a new language means adding
+  a setup step and a preset row. It never means a new stage.
+- **Commands:** `install-command`, `lint-command`, `audit-command`, `test-command` and
+  `build-command` are inputs. When one is left empty, the stage takes it from its
+  **preset table**, a single `case "$TOOLCHAIN"` block near the top of the stage.
+  Presets are defaults, not special cases: any repo can override any command, and
+  `toolchain: none` with explicit commands works for anything.
+- **Build runners:** the build preset also chooses each platform's runner. Go and .NET
+  cross-compile every OS from `ubuntu-latest`. Rust and Node build darwin on
+  `macos-latest` and windows on `windows-latest`. The build command receives
+  `TARGET_OS`, `TARGET_ARCH`, `VERSION`, `NAME` and `OUTPUT_DIR`, and only has to put
+  files in `OUTPUT_DIR`. Archiving and checksums are the same for every language.
+- **Toolchain-only extras** (Windows version resources for Go) are optional inputs, so
+  other toolchains skip them. An extra that needs its own setup becomes its own stage,
+  built so another toolchain could use it.
+- **Containers don't care about the language.** The Dockerfile does the build, so
+  `stage-container-build` has no `toolchain` input.
 
 ### Artifact contracts
 
-These are the interfaces between stages. Change one only when every producer and
-consumer changes in the same PR.
+These are the interfaces between stages, and the reason stages can stay language-blind.
+Change one only when every producer and consumer changes in the same PR.
 
 | Artifact | Producer | Consumer | Contents |
 | --- | --- | --- | --- |
-| `coverage-summary` | `stage-<lang>-test` | `stage-coverage-report` | `coverage-summary.json`: `{"total", "covered", "statements", "packages": [{"name", "pct", "covered", "statements"}]}`, plus the raw report |
+| `coverage` | `stage-test` | `stage-coverage-report` | `coverage.xml` in **Cobertura** format. Every ecosystem emits it: Go via `gocover-cobertura`, Rust via `cargo llvm-cov --cobertura`, Python via `coverage xml`, Node via Istanbul/c8 `cobertura`, .NET via coverlet. The report stage never sees a language-specific format. |
 | `semantic-release-config` | `stage-version-detect` | `stage-release-semantic` | the exact config the dry run used, so the real release can't disagree with it |
-| `release-files` | `stage-version-bump` | build stages, `stage-release-semantic` | files edited to carry the new version (chart, pyproject, …), restored over the checkout |
-| `build-*` | `stage-<lang>-build` | `stage-release-semantic` | release assets attached to the GitHub release |
+| `release-files` | `stage-version-bump` | every later release stage | files edited to carry the new version (chart, pyproject, package.json, …), restored over the checkout |
+| `build-<os>-<arch>` | `stage-build` | `stage-release-semantic` | `<name>-<version>-<os>-<arch>.zip` + `.sha256`, attached to the GitHub release |
 
 ### Release ordering
 
@@ -58,9 +99,10 @@ partial artifacts.
 
 ## Writing a stage
 
-- **File names.** `stage-<what>.yml` is internal (consumers don't call it). Public
-  workflows are `<type>-ci.yml` and `<type>-release.yml`. Everything is in
-  `.github/workflows/` because GitHub doesn't allow subdirectories there.
+- **File names.** The public workflows are `<type>-ci.yml` and `<type>-release.yml`.
+  `stage-<what>.yml` files are building blocks; a repo with an unusual layout may call one
+  directly, so they keep stable inputs too. This repo's own pipelines are `self-*.yml`.
+  Everything lives in `.github/workflows/` because GitHub doesn't allow subdirectories there.
 - **Calling other stages.** Use `uses: ./.github/workflows/stage-x.yml`. Inside a reusable
   workflow this resolves to *this* repo at the same ref as the caller pinned, so a
   consumer on `@v1` gets a consistent set.

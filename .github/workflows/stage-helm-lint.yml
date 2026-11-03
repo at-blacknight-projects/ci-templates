@@ -1,0 +1,93 @@
+name: Helm lint (stage)
+
+# For each chart: helm lint --strict, then render it with its defaults and with every
+# ci/*-values.yaml (the chart-testing convention), and validate the rendered manifests
+# against the Kubernetes schemas with kubeconform.
+#
+# Caller grants: contents: read.
+
+on:
+  workflow_call:
+    inputs:
+      charts:
+        description: Chart directories, one per line. Empty finds every Chart.yaml in the repo.
+        type: string
+        default: ""
+      helm-version:
+        description: Helm version.
+        type: string
+        default: v3.22.1
+      kubeconform:
+        description: Validate rendered manifests with kubeconform.
+        type: boolean
+        default: true
+      kubernetes-version:
+        description: Kubernetes version to validate against.
+        type: string
+        default: 1.33.0
+      kubeconform-version:
+        description: kubeconform version.
+        type: string
+        default: v0.8.0
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Helm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ inputs.helm-version }}
+
+      - name: Install kubeconform
+        if: inputs.kubeconform
+        env:
+          VERSION: ${{ inputs.kubeconform-version }}
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" kubeconform
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Lint and render
+        env:
+          CHARTS: ${{ inputs.charts }}
+          KUBECONFORM: ${{ inputs.kubeconform }}
+          KUBERNETES_VERSION: ${{ inputs.kubernetes-version }}
+        run: |
+          if [ -z "$CHARTS" ]; then
+            CHARTS=$(find . -name Chart.yaml -not -path './.git/*' -not -path '*/charts/*/Chart.yaml' -exec dirname {} \; | sort)
+          fi
+          if [ -z "$CHARTS" ]; then
+            echo "::error::No charts found"
+            exit 1
+          fi
+
+          failed=0
+          while IFS= read -r chart; do
+            [ -z "$chart" ] && continue
+            echo "::group::$chart"
+            if [ -f "$chart/Chart.lock" ] || grep -q '^dependencies:' "$chart/Chart.yaml"; then
+              helm dependency build "$chart" || failed=1
+            fi
+            helm lint --strict "$chart" || failed=1
+
+            values=("")
+            for f in "$chart"/ci/*-values.yaml; do [ -f "$f" ] && values+=("$f"); done
+            for v in "${values[@]}"; do
+              args=()
+              [ -n "$v" ] && args=(-f "$v")
+              echo "Rendering ${v:-default values}"
+              if ! helm template ci "$chart" "${args[@]}" > rendered.yaml; then failed=1; continue; fi
+              if [ "$KUBECONFORM" = "true" ]; then
+                kubeconform -strict -summary -ignore-missing-schemas \
+                  -kubernetes-version "$KUBERNETES_VERSION" rendered.yaml || failed=1
+              fi
+            done
+            echo "::endgroup::"
+          done <<< "$CHARTS"
+          exit "$failed"

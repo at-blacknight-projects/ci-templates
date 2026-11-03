@@ -1,0 +1,76 @@
+name: Security scan (stage)
+
+# Trivy filesystem scan of the checkout: dependency vulnerabilities, committed secrets and
+# IaC misconfigurations. There are two passes over the same scan. One uploads every finding
+# to the Security tab as SARIF; the other fails the check on findings at `severity` or
+# above. .trivyignore in the repo is honoured, so justify each entry in it.
+#
+# Caller grants: contents: read, security-events: write (SARIF upload; skipped on fork PRs).
+
+on:
+  workflow_call:
+    inputs:
+      scan-ref:
+        description: Path to scan.
+        type: string
+        default: "."
+      scanners:
+        description: Trivy scanners.
+        type: string
+        default: vuln,secret,misconfig
+      severity:
+        description: Severities that fail the check.
+        type: string
+        default: CRITICAL,HIGH
+      ignore-unfixed:
+        description: Ignore vulnerabilities with no fixed version yet.
+        type: boolean
+        default: true
+      sarif:
+        description: Upload all findings to the GitHub Security tab.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Trivy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Scan (SARIF, all severities)
+        if: inputs.sarif
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.scan-ref }}
+          scanners: ${{ inputs.scanners }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+
+      - name: Upload SARIF
+        if: inputs.sarif
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs
+
+      - name: Gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.scan-ref }}
+          scanners: ${{ inputs.scanners }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          severity: ${{ inputs.severity }}
+          exit-code: "1"
+          skip-setup-trivy: ${{ inputs.sarif }}
