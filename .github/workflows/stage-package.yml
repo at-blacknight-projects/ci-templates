@@ -297,7 +297,7 @@ jobs:
 
       - name: Install cosign
         if: inputs.publish && inputs.sigstore
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2  # no moving major tag upstream
 
       - name: Sign SHA256SUMS (Sigstore keyless)
         if: inputs.publish && inputs.sigstore

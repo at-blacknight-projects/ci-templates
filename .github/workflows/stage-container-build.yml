@@ -227,7 +227,7 @@ jobs:
 
       - name: Install cosign
         if: inputs.publish && inputs.sign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2  # no moving major tag upstream
 
       - name: Sign (keyless)
         if: inputs.publish && inputs.sign

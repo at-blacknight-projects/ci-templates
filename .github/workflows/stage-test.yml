@@ -182,31 +182,37 @@ jobs:
           global-json-file: ${{ steps.preset.outputs.version-file }}
 
       - name: Install
+        id: install
         if: steps.preset.outputs.install != ''
         env:
           CMD: ${{ steps.preset.outputs.install }}
         run: bash -eo pipefail -c "$CMD"
 
+      # Lint, audit and test each run even if another failed, so one red check never
+      # hides the others' results; the job still fails if any of them did. Only a
+      # failed install stops them, since nothing can run without dependencies.
       - name: Lint
-        if: inputs.lint && steps.preset.outputs.lint != ''
+        if: ${{ !cancelled() && steps.install.outcome != 'failure' && inputs.lint && steps.preset.outputs.lint != '' }}
         env:
           CMD: ${{ steps.preset.outputs.lint }}
         run: bash -eo pipefail -c "$CMD"
 
       - name: Audit dependencies
-        if: inputs.audit && steps.preset.outputs.audit != ''
+        if: ${{ !cancelled() && steps.install.outcome != 'failure' && inputs.audit && steps.preset.outputs.audit != '' }}
         env:
           CMD: ${{ steps.preset.outputs.audit }}
         run: bash -eo pipefail -c "$CMD"
 
       - name: Test
-        if: steps.preset.outputs.test != ''
+        id: test
+        if: ${{ !cancelled() && steps.install.outcome != 'failure' && steps.preset.outputs.test != '' }}
         env:
           CMD: ${{ steps.preset.outputs.test }}
         run: bash -eo pipefail -c "$CMD"
 
       - name: Find coverage report
         id: coverage
+        if: ${{ !cancelled() && steps.test.outcome == 'success' }}
         env:
           COVERAGE: ${{ steps.preset.outputs.coverage }}
         run: |
@@ -220,7 +226,7 @@ jobs:
           fi
 
       - name: Upload coverage
-        if: steps.coverage.outputs.found == 'true'
+        if: ${{ !cancelled() && steps.coverage.outputs.found == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: coverage

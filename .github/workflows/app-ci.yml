@@ -68,7 +68,7 @@ jobs:
   coverage:
     name: Coverage
     needs: test
-    if: needs.test.outputs.has-coverage == 'true'
+    if: ${{ !cancelled() && needs.test.outputs.has-coverage == 'true' }}
     uses: ./.github/workflows/stage-coverage-report.yml
     permissions: { contents: read, actions: read, pull-requests: write }
     with:

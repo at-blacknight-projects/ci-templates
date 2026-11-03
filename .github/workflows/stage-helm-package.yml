@@ -120,7 +120,7 @@ jobs:
 
       - name: Install cosign
         if: inputs.publish && inputs.oci-registry != 'none' && inputs.sign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2  # no moving major tag upstream
 
       - name: Push to OCI
         if: inputs.publish && inputs.oci-registry != 'none'
