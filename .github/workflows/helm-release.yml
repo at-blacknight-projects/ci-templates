@@ -32,7 +32,7 @@ on:
       app-private-key: { required: false, description: GitHub App private key. }
       registry-username: { required: false, description: OCI registry user (empty uses GITHUB_TOKEN on ghcr.io). }
       registry-password: { required: false, description: OCI registry password or token. }
-      index-token: { required: false, description: Token that can push to index-repo. }
+      index-token: { required: false, description: "Token that can push to index-repo; only needed when no app is passed." }
     outputs:
       version: { description: Released version (empty if nothing was released)., value: "${{ jobs.release.outputs.version }}" }
       git-tag: { description: Released tag., value: "${{ jobs.release.outputs.git-tag }}" }
@@ -77,6 +77,8 @@ jobs:
       sign: ${{ inputs.sign }}
     secrets:
       index-token: ${{ secrets.index-token }}
+      app-id: ${{ secrets.app-id }}
+      app-private-key: ${{ secrets.app-private-key }}
       registry-username: ${{ secrets.registry-username }}
       registry-password: ${{ secrets.registry-password }}
 
