@@ -130,6 +130,31 @@ create a GitHub App that is allowed to bypass, store its ID and private key as s
 and pass them as `app-id` and `app-private-key`. Without them the workflows use
 `GITHUB_TOKEN`.
 
+## Dependency updates (Renovate)
+
+Extend the shared policy in your repo's `renovate.json`:
+
+```json
+{ "extends": ["github>at-blacknight-projects/ci-templates"] }
+```
+
+What the policy does:
+- **Commit types that suit semantic-release.** Runtime dependencies, toolchains and base
+  images commit as `fix(deps):`, so they ship a patch release. CI and tooling commit as
+  `chore(deps):` and release nothing.
+- **When updates arrive.** Routine PRs open before 6am UTC on Mondays. Vulnerability
+  fixes open at any time.
+- **Auto-merge.** Non-major GitHub Actions and annotated tool updates merge themselves
+  once CI passes. Majors always wait for review.
+- **Go toolchain.** The `toolchain` line in `go.mod` and the `golang` image tag move in
+  one PR, because official golang images ignore `go.mod`'s toolchain.
+- **Pins in scripts.** Versions inside scripts are tracked through `# renovate:`
+  comments (see `annotations.json`).
+
+To run Renovate yourself instead of using a hosted service, call `renovate.yml` on a
+schedule with your own GitHub App. The header of `renovate.yml` lists the permissions the
+app needs.
+
 ## Versioning
 
 Pin a major version: `@v1`. It moves to each compatible release, while `@v1.2.3` pins

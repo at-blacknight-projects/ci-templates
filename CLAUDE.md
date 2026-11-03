@@ -168,6 +168,19 @@ can see secrets, never touch a key.
   because of that action's history.
 - npm tools are pinned to a major version (`semantic-release@25`), and the at-blacknight
   plugins to an exact version.
+- **Every version Renovate's managers can't see needs a `# renovate:` annotation** on the
+  line directly above it. That covers tools inside `run:` scripts, input defaults, and
+  versions inside URLs. Put the version in a variable and use the variable:
+  ```
+  # renovate: datasource=github-releases depName=owner/tool [extractVersion=^v(?<version>.+)$]
+  tool=1.2.3
+  ```
+  `annotations.json` is the custom manager that reads these. Check that a new pin is
+  found by running Renovate's extraction locally (`renovate --platform=local
+  --dry-run=extract`, on a clone without `renovate.json`).
+- Renovate itself is self-hosted (`renovate.yml`, run by `self-renovate.yml` as the
+  org's app). `default.json` is the shared policy other repos extend. Policy changes go
+  there, never into one repo's config.
 - This repo releases itself with its own stages: semantic-release from conventional
   commits, then the moving major tag (`v1`) is updated to the new release. The base tag
   is `v0.0.0`.
