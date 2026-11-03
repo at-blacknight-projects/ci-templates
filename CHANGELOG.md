@@ -1,3 +1,9 @@
+## [0.2.1](https://github.com/at-blacknight-projects/ci-templates/compare/v0.2.0...v0.2.1) (2026-11-03)
+
+### Bug Fixes
+
+* check SHA-pinned action refs over git, not the REST API ([7ed8efc](https://github.com/at-blacknight-projects/ci-templates/commit/7ed8efccf0cefd072c7c41bbd47ec3c0034cbb25))
+
 ## [0.2.0](https://github.com/at-blacknight-projects/ci-templates/compare/v0.1.1...v0.2.0) (2026-11-03)
 
 ### Features
