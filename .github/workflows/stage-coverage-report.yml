@@ -57,10 +57,13 @@ jobs:
         uses: dawidd6/action-download-artifact@v28
         continue-on-error: true
         with:
+          # Only finished push runs on the base branch. Without these filters the search
+          # can return this PR's own in-progress run and report a ±0 delta against itself.
           branch: ${{ github.base_ref }}
+          event: push
+          workflow_conclusion: completed
           name: ${{ inputs.artifact-name }}
           path: base
-          workflow_conclusion: ""
           search_artifacts: true
           if_no_artifact_found: warn
 
