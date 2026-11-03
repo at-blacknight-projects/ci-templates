@@ -9,13 +9,21 @@ missing=0
 while read -r ref; do
   repo=$(cut -d@ -f1 <<< "$ref" | cut -d/ -f1-2)
   ver=${ref##*@}
-  [ "$repo" = "$GITHUB_REPOSITORY" ] && continue
-  if gh api "repos/$repo/git/ref/tags/$ver" > /dev/null 2>&1 \
-    || gh api "repos/$repo/git/ref/heads/$ver" > /dev/null 2>&1 \
-    || gh api "repos/$repo/commits/$ver" > /dev/null 2>&1; then
+  [ "$repo" = "${GITHUB_REPOSITORY:-}" ] && continue
+  if [[ "$ver" =~ ^[0-9a-f]{40}$ ]]; then
+    checks=("repos/$repo/git/commits/$ver")
+  else
+    checks=("repos/$repo/git/ref/tags/$ver" "repos/$repo/git/ref/heads/$ver")
+  fi
+  found=0 ; errors=""
+  for path in "${checks[@]}"; do
+    if out=$(gh api "$path" 2>&1); then found=1; break; fi
+    errors+=" [$path: $(head -c 200 <<< "$out" | tr '\n' ' ')]"
+  done
+  if [ "$found" = 1 ]; then
     echo "ok       $ref"
   else
-    echo "::error::$ref does not resolve to a tag, branch or commit"
+    echo "::error::$ref does not resolve to a tag, branch or commit.$errors"
     missing=1
   fi
 done < <(grep -rhoE 'uses: *[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[A-Za-z0-9_.-]+' "$dir" | sed -E 's/uses: *//' | sort -u)
