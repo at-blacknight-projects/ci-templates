@@ -20,6 +20,14 @@
   "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
   "packageRules": [
     {
+      "description": "aquasecurity's IP allow list refuses token-authenticated API calls from runners, even for public repos, so github-tags lookups return nothing. git ls-remote is allowed, so look their actions up as git tags.",
+      "matchManagers": ["github-actions"],
+      "matchDatasources": ["github-tags"],
+      "matchPackageNames": ["aquasecurity/**"],
+      "overrideDatasource": "git-tags",
+      "overridePackageName": "https://github.com/{{packageName}}"
+    },
+    {
       "description": "Runtime dependencies change what ships, so they are fix(deps) and semantic-release cuts a patch release. Everything else (CI, tooling) stays chore(deps) and releases nothing.",
       "matchDepTypes": ["require", "dependencies", "toolchain"],
       "semanticCommitType": "fix"
