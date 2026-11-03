@@ -1,3 +1,9 @@
+## [0.1.1](https://github.com/at-blacknight-projects/ci-templates/compare/v0.1.0...v0.1.1) (2026-11-03)
+
+### Bug Fixes
+
+* author release commits as the identity that pushes them ([09ba5b4](https://github.com/at-blacknight-projects/ci-templates/commit/09ba5b48eea2a5d6614fe3d197c8bbe6bfe9729a))
+
 ## [0.1.0](https://github.com/at-blacknight-projects/ci-templates/compare/v0.0.0...v0.1.0) (2026-11-03)
 
 ### Features
