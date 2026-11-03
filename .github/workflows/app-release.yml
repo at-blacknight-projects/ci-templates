@@ -36,8 +36,8 @@ on:
       index-url: { description: Public URL of index-repo., type: string, default: "" }
       replacements: { description: 'JSON array of {"file", "pattern", "replacement"} version edits.', type: string, default: "[]" }
       bump-command: { description: Extra version-bump command (VERSION is set)., type: string, default: "" }
-      git-user-name: { description: Committer of the release commit., type: string, default: "Release Bot" }
-      git-user-email: { description: Committer email of the release commit., type: string, default: "release-bot@users.noreply.github.com" }
+      git-user-name: { description: "Release commit author. Empty uses the GitHub App bot, or github-actions[bot].", type: string, default: "" }
+      git-user-email: { description: "Release commit author email. Empty uses the bot noreply address.", type: string, default: "" }
     secrets:
       app-id: { required: false, description: GitHub App ID for releases past branch protection. }
       app-private-key: { required: false, description: GitHub App private key. }
