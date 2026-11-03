@@ -127,6 +127,8 @@ jobs:
         run: |
           native='{"linux": "ubuntu-latest", "darwin": "macos-latest", "windows": "windows-latest"}'
           linux_only='{"linux": "ubuntu-latest", "darwin": "ubuntu-latest", "windows": "ubuntu-latest"}'
+          # Build commands are single-quoted on purpose: they expand per platform, not here.
+          # shellcheck disable=SC2016
           case "$TOOLCHAIN" in
             go)
               platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"

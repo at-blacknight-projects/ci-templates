@@ -90,6 +90,8 @@ jobs:
           IN_COVERAGE: ${{ inputs.coverage-file }}
         run: |
           version="" ; version_file="" ; install="" ; lint="" ; audit="" ; test="" ; coverage="coverage.xml"
+          # Commands are single-quoted on purpose: they expand when they run, not here.
+          # shellcheck disable=SC2016
           case "$TOOLCHAIN" in
             go)
               version_file="go.mod"
@@ -136,17 +138,15 @@ jobs:
           elif [ -n "$IN_VERSION_FILE" ]; then version=""; version_file="$IN_VERSION_FILE"; fi
           [ -n "$version_file" ] && version_file="$PWD/$version_file"
 
+          multiline() { printf '%s<<__CMD__\n%s\n__CMD__\n' "$1" "$2"; }
           {
             echo "version=$version"
             echo "version-file=$version_file"
             echo "coverage=${IN_COVERAGE:-$coverage}"
-            for k in install lint audit test; do
-              in_var="IN_${k^^}"
-              value="${!in_var:-${!k}}"
-              echo "$k<<__CMD__"
-              echo "$value"
-              echo "__CMD__"
-            done
+            multiline install "${IN_INSTALL:-$install}"
+            multiline lint "${IN_LINT:-$lint}"
+            multiline audit "${IN_AUDIT:-$audit}"
+            multiline test "${IN_TEST:-$test}"
           } >> "$GITHUB_OUTPUT"
 
       - if: inputs.toolchain == 'go'
