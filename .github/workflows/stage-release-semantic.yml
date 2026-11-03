@@ -126,7 +126,7 @@ jobs:
             @semantic-release/changelog@6 \
             @semantic-release/git@11 \
             @semantic-release/github@12 \
-            conventional-changelog-conventionalcommits@10 \
+            conventional-changelog-conventionalcommits@9 \
             "@at-blacknight/semantic-release-ci-output@${ci_output}"
 
       - name: Download semantic-release config
