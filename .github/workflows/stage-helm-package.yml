@@ -1,0 +1,178 @@
+name: Helm package (stage)
+
+# Packages each chart (its version was set by stage-version-bump) and, when publishing,
+# pushes it to an OCI registry, a classic index repo (index.yaml + .tgz served by GitHub
+# Pages), or both. Charts pushed to OCI are signed keylessly with cosign.
+#
+# In release workflows, run this after stage-container-build so a chart is never
+# published for an image that doesn't exist.
+#
+# Caller grants: contents: read, packages: write, id-token: write.
+
+on:
+  workflow_call:
+    inputs:
+      charts:
+        description: Chart directories, one per line. Empty finds every Chart.yaml in the repo.
+        type: string
+        default: ""
+      publish:
+        description: Push the packages. False only packages them.
+        type: boolean
+        default: false
+      restore-artifact:
+        description: Artifact copied over the checkout first (release-files from stage-version-bump).
+        type: string
+        default: ""
+      helm-version:
+        description: Helm version.
+        type: string
+        default: v3.22.1
+      oci-registry:
+        description: OCI destination, e.g. oci://ghcr.io/example/charts. Empty means oci://ghcr.io/<owner>/charts; "none" skips OCI.
+        type: string
+        default: ""
+      index-repo:
+        description: owner/repo of a classic chart index (index.yaml + .tgz), e.g. served by GitHub Pages. Empty skips it.
+        type: string
+        default: ""
+      index-branch:
+        description: Branch of index-repo to commit to.
+        type: string
+        default: main
+      index-url:
+        description: Public URL of index-repo. Empty means https://<owner>.github.io/<repo>/.
+        type: string
+        default: ""
+      sign:
+        description: Sign charts pushed to OCI with cosign (keyless).
+        type: boolean
+        default: true
+    secrets:
+      index-token:
+        description: Token that can push to index-repo.
+        required: false
+      registry-username:
+        description: OCI registry user. Empty uses the workflow actor with GITHUB_TOKEN (ghcr.io).
+        required: false
+      registry-password:
+        description: OCI registry password or token.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Charts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download files to restore
+        if: inputs.restore-artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.restore-artifact }}
+          path: ${{ runner.temp }}/restore
+
+      - name: Restore files
+        if: inputs.restore-artifact != ''
+        run: cp -av "$RUNNER_TEMP/restore/." .
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ inputs.helm-version }}
+
+      - name: Package
+        env:
+          CHARTS: ${{ inputs.charts }}
+        run: |
+          if [ -z "$CHARTS" ]; then
+            CHARTS=$(find . -name Chart.yaml -not -path './.git/*' -not -path '*/charts/*/Chart.yaml' -exec dirname {} \; | sort)
+          fi
+          mkdir -p dist
+          while IFS= read -r chart; do
+            [ -z "$chart" ] && continue
+            if [ -f "$chart/Chart.lock" ] || grep -q '^dependencies:' "$chart/Chart.yaml"; then
+              helm dependency build "$chart"
+            fi
+            helm package "$chart" --destination dist
+          done <<< "$CHARTS"
+          ls -l dist
+
+      - name: Resolve OCI destination
+        id: oci
+        if: inputs.publish && inputs.oci-registry != 'none'
+        env:
+          OCI: ${{ inputs.oci-registry }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          dest="${OCI:-oci://ghcr.io/${OWNER}/charts}"
+          dest=$(tr '[:upper:]' '[:lower:]' <<< "$dest")
+          host="${dest#oci://}"; host="${host%%/*}"
+          echo "dest=$dest" >> "$GITHUB_OUTPUT"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        if: inputs.publish && inputs.oci-registry != 'none' && inputs.sign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Push to OCI
+        if: inputs.publish && inputs.oci-registry != 'none'
+        env:
+          DEST: ${{ steps.oci.outputs.dest }}
+          HOST: ${{ steps.oci.outputs.host }}
+          USERNAME: ${{ secrets.registry-username || github.actor }}
+          PASSWORD: ${{ secrets.registry-password || github.token }}
+          SIGN: ${{ inputs.sign }}
+        run: |
+          printf '%s' "$PASSWORD" | helm registry login "$HOST" --username "$USERNAME" --password-stdin
+          [ "$SIGN" = true ] && printf '%s' "$PASSWORD" | cosign login "$HOST" --username "$USERNAME" --password-stdin
+          for pkg in dist/*.tgz; do
+            out=$(helm push "$pkg" "$DEST" 2>&1) || { echo "$out"; exit 1; }
+            echo "$out"
+            if [ "$SIGN" = true ]; then
+              ref=$(awk '/^Pushed:/ {print $2}' <<< "$out")
+              digest=$(awk '/^Digest:/ {print $2}' <<< "$out")
+              cosign sign --yes "${ref%:*}@${digest}"
+            fi
+          done
+
+      - name: Check out the chart index
+        if: inputs.publish && inputs.index-repo != ''
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.index-repo }}
+          ref: ${{ inputs.index-branch }}
+          token: ${{ secrets.index-token }}
+          path: chart-index
+
+      - name: Publish to the chart index
+        if: inputs.publish && inputs.index-repo != ''
+        working-directory: chart-index
+        env:
+          INDEX_REPO: ${{ inputs.index-repo }}
+          INDEX_URL: ${{ inputs.index-url }}
+          BRANCH: ${{ inputs.index-branch }}
+        run: |
+          url="${INDEX_URL:-https://${INDEX_REPO%%/*}.github.io/${INDEX_REPO#*/}/}"
+          cp ../dist/*.tgz .
+          [ -s index.yaml ] || printf 'apiVersion: v1\nentries: {}\n' > index.yaml
+          helm repo index . --url "$url" --merge index.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ./*.tgz index.yaml
+          if git diff --cached --quiet; then echo "Nothing new to publish"; exit 0; fi
+          git commit -m "Publish $(cd ../dist && ls -- *.tgz | tr '\n' ' ')"
+          git push origin "HEAD:$BRANCH"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helm-charts
+          path: dist/
+          retention-days: 5

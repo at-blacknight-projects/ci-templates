@@ -1,0 +1,126 @@
+name: Version bump (stage)
+
+# Writes the release version into the repo's files before anything is built, so images,
+# charts and binaries carry it and the release commit records it. Three ways, in this
+# order:
+#   charts        Chart.yaml version (and appVersion), plus chart-values yq paths
+#   replacements  regex find/replace in any file (from atb-ci's no-build-release)
+#   bump-command  anything else, with VERSION in the environment
+#
+# Produces: the `release-files` artifact (every changed file, at its repo path, plus
+# .release-version) and the `files` output (changed paths, one per line) for
+# stage-release-semantic's git-commit-files.
+#
+# Caller grants: contents: read.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to write (stage-version-detect's `version` output).
+        type: string
+        required: true
+      charts:
+        description: Chart directories whose Chart.yaml version is set, one per line.
+        type: string
+        default: ""
+      chart-app-version:
+        description: Also set appVersion in each chart.
+        type: boolean
+        default: true
+      chart-values:
+        description: yq paths in each chart's values.yaml set to the version, one per line (e.g. .image.tag).
+        type: string
+        default: ""
+      replacements:
+        description: 'JSON array of {"file", "pattern", "replacement"}; {{version}} in replacement is the version, pattern is a sed regex.'
+        type: string
+        default: "[]"
+      bump-command:
+        description: Extra command run with VERSION set (e.g. npm version "$VERSION" --no-git-tag-version).
+        type: string
+        default: ""
+    outputs:
+      files:
+        description: Changed files, one per line.
+        value: ${{ jobs.bump.outputs.files }}
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Write ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    outputs:
+      files: ${{ steps.collect.outputs.files }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Charts
+        if: inputs.charts != ''
+        env:
+          VERSION: ${{ inputs.version }}
+          CHARTS: ${{ inputs.charts }}
+          APP_VERSION: ${{ inputs.chart-app-version }}
+          VALUES: ${{ inputs.chart-values }}
+        run: |
+          while IFS= read -r chart; do
+            [ -z "$chart" ] && continue
+            yq -i '.version = strenv(VERSION)' "$chart/Chart.yaml"
+            [ "$APP_VERSION" = true ] && yq -i '.appVersion = strenv(VERSION)' "$chart/Chart.yaml"
+            while IFS= read -r path; do
+              [ -z "$path" ] && continue
+              yq -i "${path} = strenv(VERSION)" "$chart/values.yaml"
+            done <<< "$VALUES"
+          done <<< "$CHARTS"
+
+      - name: Replacements
+        if: inputs.replacements != '[]' && inputs.replacements != ''
+        env:
+          VERSION: ${{ inputs.version }}
+          REPLACEMENTS: ${{ inputs.replacements }}
+        run: |
+          jq -c '.[]' <<< "$REPLACEMENTS" | while read -r spec; do
+            file=$(jq -r .file <<< "$spec")
+            pattern=$(jq -r .pattern <<< "$spec")
+            replacement=$(jq -r .replacement <<< "$spec")
+            replacement="${replacement//\{\{version\}\}/$VERSION}"
+            if [ ! -f "$file" ]; then echo "::error::replacements: $file not found"; exit 1; fi
+            sed -i "s|$pattern|$replacement|g" "$file"
+            echo "$file: $pattern -> $replacement"
+          done
+
+      - name: Bump command
+        if: inputs.bump-command != ''
+        env:
+          VERSION: ${{ inputs.version }}
+          CMD: ${{ inputs.bump-command }}
+        run: bash -eo pipefail -c "$CMD"
+
+      - name: Collect changed files
+        id: collect
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          files=$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort -u)
+          mkdir -p "$RUNNER_TEMP/release-files"
+          printf '%s\n' "$VERSION" > "$RUNNER_TEMP/release-files/.release-version"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            mkdir -p "$RUNNER_TEMP/release-files/$(dirname "$f")"
+            cp -p "$f" "$RUNNER_TEMP/release-files/$f"
+          done <<< "$files"
+          git diff
+          {
+            echo "files<<__FILES__"
+            echo "$files"
+            echo "__FILES__"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release-files/
+          include-hidden-files: true
+          retention-days: 5

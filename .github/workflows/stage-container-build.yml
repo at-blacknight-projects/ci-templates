@@ -1,0 +1,274 @@
+name: Container build (stage)
+
+# For each image: build a linux/amd64 copy, scan it with Trivy (SARIF plus a severity
+# gate), then, when publishing, build every platform, push it with SBOM and provenance,
+# sign it and attest it. With publish: false (PR checks), the scanned build is the end:
+# nothing is pushed or signed.
+#
+# The language doesn't matter here: the Dockerfile does the build. VERSION, COMMIT and
+# BUILD_DATE are always passed as build args.
+#
+# Signing: keyless cosign by default (no secrets). Pass cosign-private-key and
+# cosign-password to sign with your own key as well.
+#
+# Tags when publishing: <version>; `latest` unless it's a pre-release; the release
+# channel name (e.g. `alpha`) for pre-releases; and the commit SHA.
+#
+# Caller grants: contents: read, packages: write, id-token: write, attestations: write,
+# security-events: write.
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: 'JSON array of images: [{"name": "", "context": ".", "file": "Dockerfile", "platforms": "linux/amd64,linux/arm64", "build-args": "K=V\nK2=V2", "target": ""}]. An empty name means the image is named after the repository.'
+        type: string
+        default: '[{"name": "", "context": "."}]'
+      version:
+        description: Version (stage-version-detect). Empty means a check build.
+        type: string
+        default: ""
+      prerelease:
+        description: Whether the version is a pre-release (no `latest` tag).
+        type: boolean
+        default: false
+      channel:
+        description: Release channel, tagged for pre-releases (e.g. alpha).
+        type: string
+        default: ""
+      publish:
+        description: Push, sign and attest. False only builds and scans.
+        type: boolean
+        default: false
+      registry:
+        description: Registry host.
+        type: string
+        default: ghcr.io
+      image-prefix:
+        description: Image path before the name. Empty means <registry>/<owner>/<repo>.
+        type: string
+        default: ""
+      default-platforms:
+        description: Platforms for images that don't set their own.
+        type: string
+        default: linux/amd64,linux/arm64
+      restore-artifact:
+        description: Artifact copied over the checkout first (release-files from stage-version-bump).
+        type: string
+        default: ""
+      scan-severity:
+        description: Image vulnerabilities at these severities fail the build.
+        type: string
+        default: CRITICAL,HIGH
+      sarif:
+        description: Upload image findings to the Security tab.
+        type: boolean
+        default: true
+      sign:
+        description: Sign pushed images with cosign (keyless, plus your key if passed).
+        type: boolean
+        default: true
+      attest:
+        description: Attest build provenance for pushed images.
+        type: boolean
+        default: true
+    secrets:
+      registry-username:
+        description: Registry user. Empty uses the workflow actor with GITHUB_TOKEN (ghcr.io).
+        required: false
+      registry-password:
+        description: Registry password or token.
+        required: false
+      cosign-private-key:
+        description: Your cosign private key, to sign with a key as well as keylessly.
+        required: false
+      cosign-password:
+        description: Password of the cosign key.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: ${{ matrix.name || github.event.repository.name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.images) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download files to restore
+        if: inputs.restore-artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.restore-artifact }}
+          path: ${{ runner.temp }}/restore
+
+      - name: Restore files
+        if: inputs.restore-artifact != ''
+        run: cp -av "$RUNNER_TEMP/restore/." .
+
+      - name: Resolve image
+        id: image
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          PREFIX: ${{ inputs.image-prefix }}
+          NAME: ${{ matrix.name }}
+          PLATFORMS: ${{ matrix.platforms || inputs.default-platforms }}
+          EXTRA_ARGS: ${{ matrix.build-args }}
+          VERSION: ${{ inputs.version }}
+          HAS_KEY: ${{ secrets.cosign-private-key != '' }}
+        run: |
+          prefix="${PREFIX:-$REGISTRY/$GITHUB_REPOSITORY}"
+          ref="$prefix"
+          [ -n "$NAME" ] && ref="$prefix/$NAME"
+          ref=$(tr '[:upper:]' '[:lower:]' <<< "$ref")
+          version="${VERSION:-0.0.0-dev+${GITHUB_SHA::7}}"
+          {
+            echo "ref=$ref"
+            echo "platforms=$PLATFORMS"
+            echo "multi=$([ "$PLATFORMS" != linux/amd64 ] && echo true || echo false)"
+            echo "has-key=$HAS_KEY"
+            echo "cache-scope=$(tr -c '[:alnum:]-' '-' <<< "${NAME:-default}")"
+            echo "build-args<<__ARGS__"
+            echo "VERSION=$version"
+            echo "COMMIT=$GITHUB_SHA"
+            echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            [ -n "$EXTRA_ARGS" ] && printf '%s\n' "$EXTRA_ARGS"
+            echo "__ARGS__"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v4
+        if: inputs.publish && steps.image.outputs.multi == 'true'
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ steps.image.outputs.ref }}
+          tags: |
+            type=raw,value=${{ inputs.version }},enable=${{ inputs.publish && inputs.version != '' }}
+            type=raw,value=latest,enable=${{ inputs.publish && inputs.version != '' && !inputs.prerelease }}
+            type=raw,value=${{ inputs.channel }},enable=${{ inputs.publish && inputs.prerelease && inputs.channel != '' }}
+            type=sha,format=long
+            type=ref,event=pr
+
+      - name: Build for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context || '.' }}
+          file: ${{ matrix.file || format('{0}/Dockerfile', matrix.context || '.') }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.image.outputs.ref }}:scan
+          build-args: ${{ steps.image.outputs.build-args }}
+          cache-from: type=gha,scope=${{ steps.image.outputs.cache-scope }}
+          cache-to: type=gha,mode=max,scope=${{ steps.image.outputs.cache-scope }}
+
+      - name: Scan (SARIF)
+        if: inputs.sarif
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.ref }}:scan
+          format: sarif
+          output: trivy-image.sarif
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+
+      - name: Upload SARIF
+        if: inputs.sarif
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image-${{ steps.image.outputs.cache-scope }}
+
+      - name: Scan (gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.ref }}:scan
+          ignore-unfixed: true
+          severity: ${{ inputs.scan-severity }}
+          exit-code: "1"
+          skip-setup-trivy: ${{ inputs.sarif }}
+
+      - name: Log in to the registry
+        if: inputs.publish
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ secrets.registry-username || github.actor }}
+          password: ${{ secrets.registry-password || github.token }}
+
+      - name: Build and push
+        id: push
+        if: inputs.publish
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context || '.' }}
+          file: ${{ matrix.file || format('{0}/Dockerfile', matrix.context || '.') }}
+          target: ${{ matrix.target }}
+          platforms: ${{ steps.image.outputs.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ steps.image.outputs.build-args }}
+          cache-from: type=gha,scope=${{ steps.image.outputs.cache-scope }}
+          cache-to: type=gha,mode=max,scope=${{ steps.image.outputs.cache-scope }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Install cosign
+        if: inputs.publish && inputs.sign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Sign (keyless)
+        if: inputs.publish && inputs.sign
+        env:
+          REF: ${{ steps.image.outputs.ref }}@${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "$REF"
+
+      - name: Sign (your key)
+        if: inputs.publish && inputs.sign && steps.image.outputs.has-key == 'true'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.cosign-private-key }}
+          COSIGN_PASSWORD: ${{ secrets.cosign-password }}
+          REF: ${{ steps.image.outputs.ref }}@${{ steps.push.outputs.digest }}
+        run: cosign sign --yes --key env://COSIGN_PRIVATE_KEY "$REF"
+
+      - name: Attest build provenance
+        if: inputs.publish && inputs.attest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.image.outputs.ref }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          {
+            echo "### ${REF}"
+            if [ "$PUBLISH" = true ]; then
+              echo "Pushed \`${DIGEST}\`"
+              echo ""
+              while IFS= read -r t; do [ -n "$t" ] && echo "- \`$t\`"; done <<< "$TAGS"
+            else
+              echo "Built and scanned (check build, not pushed)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
