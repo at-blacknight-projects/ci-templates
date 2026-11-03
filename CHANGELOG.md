@@ -1,3 +1,9 @@
+## [0.4.2](https://github.com/at-blacknight-projects/ci-templates/compare/v0.4.1...v0.4.2) (2026-11-03)
+
+### Bug Fixes
+
+* **renovate:** look up aquasecurity actions as git tags ([802325e](https://github.com/at-blacknight-projects/ci-templates/commit/802325e299c436cc75f8f208f46988b4ed04612d))
+
 ## [0.4.1](https://github.com/at-blacknight-projects/ci-templates/compare/v0.4.0...v0.4.1) (2026-11-03)
 
 ### Bug Fixes
