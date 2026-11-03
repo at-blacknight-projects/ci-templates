@@ -1,0 +1,320 @@
+name: Package (stage)
+
+# Takes every `binaries-<os>-<arch>` artifact from stage-build. When publishing, it
+# optionally signs them, then archives each platform, writes SHA256SUMS and uploads
+# everything as the `build-release` artifact that stage-release-semantic attaches to the
+# GitHub release. It runs entirely on Linux, so cross-compiled builds can be signed too.
+#
+# Signing is bring-your-own. Nothing secret lives in this repo: each kind of signing turns
+# on when its secrets are passed, and none of it runs when publish is false (PR checks).
+#
+#   Windows   jsign (Authenticode). Choose with windows-sign-provider:
+#               pkcs12          your .pfx: windows-pfx-base64 + windows-pfx-password
+#               trusted-signing Azure Trusted Signing via OIDC: azure-client-id/-tenant-id
+#                               inputs, windows-keystore = endpoint host
+#                               (e.g. weu.codesigning.azure.net), windows-alias = account/profile
+#               key-vault       Azure Key Vault via OIDC: windows-keystore = vault name,
+#                               windows-alias = certificate name
+#   macOS     rcodesign with your Developer ID .p12: macos-p12-base64 + macos-p12-password.
+#             Add apple-api-issuer-id + apple-api-key-id + apple-api-key-p8 to notarize too.
+#   Checksums Sigstore keyless signature (SHA256SUMS.sigstore.json); no secrets, needs
+#             id-token: write. Optional GPG (SHA256SUMS.asc): gpg-private-key (+ passphrase).
+#   Provenance GitHub build-provenance attestation for every archive; no secrets.
+#
+# To keep signing keys behind approval, put them in a GitHub environment with required
+# reviewers, set `environment`, and call with `secrets: inherit`. Environment secrets
+# only reach a job that names the environment. Otherwise pass the secrets explicitly.
+#
+# Caller grants: contents: read, id-token: write, attestations: write.
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Binary name (stage-build's `name` output).
+        type: string
+        required: true
+      version:
+        description: Version (stage-build's `version` output).
+        type: string
+        required: true
+      publish:
+        description: Sign and attest. False (PR checks) only archives.
+        type: boolean
+        default: false
+      environment:
+        description: GitHub environment to run in, so its protection rules and secrets apply.
+        type: string
+        default: ""
+      windows-sign-provider:
+        description: "pkcs12 | trusted-signing | key-vault. Empty means pkcs12 when windows-pfx-base64 is set, otherwise no Windows signing."
+        type: string
+        default: ""
+      windows-keystore:
+        description: "trusted-signing: endpoint host. key-vault: vault name."
+        type: string
+        default: ""
+      windows-alias:
+        description: "trusted-signing: account/profile. key-vault: certificate name. pkcs12: key alias (optional)."
+        type: string
+        default: ""
+      windows-timestamp-url:
+        description: RFC 3161 timestamp server.
+        type: string
+        default: http://timestamp.digicert.com
+      windows-description:
+        description: Signed description shown by Windows. Empty uses name.
+        type: string
+        default: ""
+      windows-url:
+        description: URL embedded in the Windows signature. Empty uses the repository URL.
+        type: string
+        default: ""
+      azure-client-id:
+        description: Entra app (federated with this repo) for trusted-signing / key-vault.
+        type: string
+        default: ""
+      azure-tenant-id:
+        description: Entra tenant for trusted-signing / key-vault.
+        type: string
+        default: ""
+      sigstore:
+        description: Keyless Sigstore signature over SHA256SUMS when publishing.
+        type: boolean
+        default: true
+      attest:
+        description: GitHub build-provenance attestations for the archives when publishing.
+        type: boolean
+        default: true
+      retention-days:
+        description: How long the packaged artifact is kept.
+        type: number
+        default: 5
+    secrets:
+      windows-pfx-base64:
+        description: Base64 of the .pfx (pkcs12 provider).
+        required: false
+      windows-pfx-password:
+        description: Password of the .pfx.
+        required: false
+      macos-p12-base64:
+        description: Base64 of the Developer ID Application .p12.
+        required: false
+      macos-p12-password:
+        description: Password of the .p12.
+        required: false
+      apple-api-issuer-id:
+        description: App Store Connect API issuer ID (notarization).
+        required: false
+      apple-api-key-id:
+        description: App Store Connect API key ID (notarization).
+        required: false
+      apple-api-key-p8:
+        description: App Store Connect API private key, .p8 contents (notarization).
+        required: false
+      gpg-private-key:
+        description: ASCII-armoured GPG private key for SHA256SUMS.asc.
+        required: false
+      gpg-passphrase:
+        description: Passphrase of the GPG key.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package${{ inputs.publish && ' and sign' || '' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: binaries-*
+          path: binaries
+
+      - name: Decide what to sign
+        id: plan
+        env:
+          PUBLISH: ${{ inputs.publish }}
+          PROVIDER: ${{ inputs.windows-sign-provider }}
+          HAS_PFX: ${{ secrets.windows-pfx-base64 != '' }}
+          HAS_MAC: ${{ secrets.macos-p12-base64 != '' }}
+          HAS_NOTARY: ${{ secrets.apple-api-key-p8 != '' && secrets.apple-api-key-id != '' && secrets.apple-api-issuer-id != '' }}
+          HAS_GPG: ${{ secrets.gpg-private-key != '' }}
+        run: |
+          windows="" ; mac=false ; notarize=false ; gpg=false
+          if [ "$PUBLISH" = true ]; then
+            windows="$PROVIDER"
+            [ -z "$windows" ] && [ "$HAS_PFX" = true ] && windows=pkcs12
+            case "$windows" in
+              ""|pkcs12|trusted-signing|key-vault) ;;
+              *) echo "::error::Unknown windows-sign-provider '$windows' (pkcs12 | trusted-signing | key-vault)"; exit 1 ;;
+            esac
+            if [ "$windows" = pkcs12 ] && [ "$HAS_PFX" != true ]; then
+              echo "::error::windows-sign-provider is pkcs12 but the windows-pfx-base64 secret is empty"; exit 1
+            fi
+            mac=$HAS_MAC
+            [ "$mac" = true ] && notarize=$HAS_NOTARY
+            gpg=$HAS_GPG
+          fi
+          {
+            echo "windows=$windows"
+            echo "mac=$mac"
+            echo "notarize=$notarize"
+            echo "gpg=$gpg"
+            echo "azure=$([ "$windows" = trusted-signing ] || [ "$windows" = key-vault ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Windows signing: ${windows:-off} · macOS signing: $mac · notarization: $notarize · GPG: $gpg"
+
+      # ---- Windows: jsign ---------------------------------------------------------
+      - name: Azure login (OIDC)
+        if: steps.plan.outputs.azure == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          allow-no-subscriptions: true
+
+      - name: Sign Windows executables
+        if: steps.plan.outputs.windows != ''
+        env:
+          PROVIDER: ${{ steps.plan.outputs.windows }}
+          PFX_B64: ${{ secrets.windows-pfx-base64 }}
+          PFX_PASSWORD: ${{ secrets.windows-pfx-password }}
+          KEYSTORE: ${{ inputs.windows-keystore }}
+          ALIAS: ${{ inputs.windows-alias }}
+          TSA: ${{ inputs.windows-timestamp-url }}
+          DESCRIPTION: ${{ inputs.windows-description || inputs.name }}
+          URL: ${{ inputs.windows-url || format('{0}/{1}', github.server_url, github.repository) }}
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" https://github.com/ebourg/jsign/releases/download/7.6/jsign-7.6.jar
+          # Passwords and tokens go to jsign as env:NAME, never on the command line.
+          args=(--tsaurl "$TSA" --tsmode RFC3161 --name "$DESCRIPTION" --url "$URL")
+          case "$PROVIDER" in
+            pkcs12)
+              umask 077
+              printf '%s' "$PFX_B64" | base64 -d > "$RUNNER_TEMP/signing.pfx"
+              args+=(--storetype PKCS12 --keystore "$RUNNER_TEMP/signing.pfx" --storepass env:PFX_PASSWORD)
+              [ -n "$ALIAS" ] && args+=(--alias "$ALIAS")
+              ;;
+            trusted-signing)
+              SIGN_TOKEN=$(az account get-access-token --resource https://codesigning.azure.net --query accessToken -o tsv)
+              echo "::add-mask::$SIGN_TOKEN"
+              export SIGN_TOKEN
+              args+=(--storetype TRUSTEDSIGNING --keystore "$KEYSTORE" --storepass env:SIGN_TOKEN --alias "$ALIAS")
+              ;;
+            key-vault)
+              SIGN_TOKEN=$(az account get-access-token --resource https://vault.azure.net --query accessToken -o tsv)
+              echo "::add-mask::$SIGN_TOKEN"
+              export SIGN_TOKEN
+              args+=(--storetype AZUREKEYVAULT --keystore "$KEYSTORE" --storepass env:SIGN_TOKEN --alias "$ALIAS")
+              ;;
+          esac
+          shopt -s nullglob
+          files=(binaries/binaries-windows-*/*.exe binaries/binaries-windows-*/*.dll)
+          if [ ${#files[@]} -eq 0 ]; then echo "No Windows executables to sign"; exit 0; fi
+          java -jar "$RUNNER_TEMP/jsign.jar" "${args[@]}" "${files[@]}"
+          rm -f "$RUNNER_TEMP/signing.pfx"
+
+      # ---- macOS: rcodesign -------------------------------------------------------
+      - name: Install rcodesign
+        if: steps.plan.outputs.mac == 'true'
+        run: |
+          v=0.29.0
+          curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${v}/apple-codesign-${v}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" --strip-components=1 "apple-codesign-${v}-x86_64-unknown-linux-musl/rcodesign"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Sign macOS executables
+        if: steps.plan.outputs.mac == 'true'
+        env:
+          P12_B64: ${{ secrets.macos-p12-base64 }}
+          P12_PASSWORD: ${{ secrets.macos-p12-password }}
+        run: |
+          umask 077
+          printf '%s' "$P12_B64" | base64 -d > "$RUNNER_TEMP/signing.p12"
+          printf '%s' "$P12_PASSWORD" > "$RUNNER_TEMP/signing.pass"
+          shopt -s nullglob
+          for f in binaries/binaries-darwin-*/*; do
+            [ -f "$f" ] || continue
+            file -b "$f" | grep -q 'Mach-O' || continue
+            rcodesign sign --p12-file "$RUNNER_TEMP/signing.p12" --p12-password-file "$RUNNER_TEMP/signing.pass" \
+              --code-signature-flags runtime "$f"
+          done
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/signing.pass"
+
+      - name: Notarize macOS executables
+        if: steps.plan.outputs.notarize == 'true'
+        env:
+          ISSUER: ${{ secrets.apple-api-issuer-id }}
+          KEY_ID: ${{ secrets.apple-api-key-id }}
+          KEY_P8: ${{ secrets.apple-api-key-p8 }}
+        run: |
+          umask 077
+          printf '%s' "$KEY_P8" > "$RUNNER_TEMP/api-key.p8"
+          rcodesign encode-app-store-connect-api-key -o "$RUNNER_TEMP/api-key.json" "$ISSUER" "$KEY_ID" "$RUNNER_TEMP/api-key.p8"
+          # Bare executables can't be stapled; Gatekeeper checks the ticket online.
+          for d in binaries/binaries-darwin-*; do
+            [ -d "$d" ] || continue
+            (cd "$d" && zip -q -r "$RUNNER_TEMP/notarize.zip" .)
+            rcodesign notary-submit --api-key-file "$RUNNER_TEMP/api-key.json" --wait "$RUNNER_TEMP/notarize.zip"
+            rm -f "$RUNNER_TEMP/notarize.zip"
+          done
+          rm -f "$RUNNER_TEMP/api-key.p8" "$RUNNER_TEMP/api-key.json"
+
+      # ---- Archive and checksum ---------------------------------------------------
+      - name: Archive
+        env:
+          NAME: ${{ inputs.name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist
+          for d in binaries/binaries-*; do
+            [ -d "$d" ] || continue
+            platform="${d#binaries/binaries-}"
+            # Artifacts don't keep the executable bit.
+            [[ "$platform" == windows-* ]] || find "$d" -maxdepth 1 -type f -exec chmod +x {} +
+            (cd "$d" && zip -q -r "$GITHUB_WORKSPACE/dist/${NAME}-${VERSION}-${platform}.zip" .)
+          done
+          (cd dist && sha256sum ./*.zip | sed 's| \./| |' > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Sign SHA256SUMS (GPG)
+        if: steps.plan.outputs.gpg == 'true'
+        uses: crazy-max/ghaction-import-gpg@v7
+        id: gpg
+        with:
+          gpg_private_key: ${{ secrets.gpg-private-key }}
+          passphrase: ${{ secrets.gpg-passphrase }}
+
+      - name: Write SHA256SUMS.asc
+        if: steps.plan.outputs.gpg == 'true'
+        env:
+          FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+        run: gpg --batch --yes --local-user "$FINGERPRINT" --armor --detach-sign --output dist/SHA256SUMS.asc dist/SHA256SUMS
+
+      - name: Install cosign
+        if: inputs.publish && inputs.sigstore
+        uses: sigstore/cosign-installer@v4
+
+      - name: Sign SHA256SUMS (Sigstore keyless)
+        if: inputs.publish && inputs.sigstore
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+
+      - name: Attest build provenance
+        if: inputs.publish && inputs.attest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-release
+          path: dist/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error

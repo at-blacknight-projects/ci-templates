@@ -40,7 +40,9 @@ The stages:
   stage-helm-lint          lint, render, kubeconform
   stage-version-detect     semantic-release dry run → version, channel, prerelease
   stage-version-bump       writes the version into files → release-files
-  stage-build              per platform: build → archive + checksum      (publish: false = check)
+  stage-build              per platform: compile → raw binaries
+  stage-package            sign (bring your own certs) → archive → SHA256SUMS → Sigstore + attestations
+                                                                         (publish: false = archive only)
   stage-container-build    build → scan → push → sign                    (publish: false = check)
   stage-helm-package       package + publish charts, after images
   stage-release-semantic   tag, GitHub release, changelog commit         ALWAYS LAST
@@ -87,7 +89,8 @@ Change one only when every producer and consumer changes in the same PR.
 | `coverage` | `stage-test` | `stage-coverage-report` | `coverage.xml` in **Cobertura** format. Every ecosystem emits it: Go via `gocover-cobertura`, Rust via `cargo llvm-cov --cobertura`, Python via `coverage xml`, Node via Istanbul/c8 `cobertura`, .NET via coverlet. The report stage never sees a language-specific format. |
 | `semantic-release-config` | `stage-version-detect` | `stage-release-semantic` | the exact config the dry run used, so the real release can't disagree with it |
 | `release-files` | `stage-version-bump` | every later release stage | files edited to carry the new version (chart, pyproject, package.json, …), restored over the checkout |
-| `build-<os>-<arch>` | `stage-build` | `stage-release-semantic` | `<name>-<version>-<os>-<arch>.zip` + `.sha256`, attached to the GitHub release |
+| `binaries-<os>-<arch>` | `stage-build` | `stage-package` | the unsigned files the build command left in `OUTPUT_DIR` for that platform |
+| `build-release` | `stage-package` | `stage-release-semantic` | `<name>-<version>-<os>-<arch>.zip` per platform, `SHA256SUMS`, and when publishing `SHA256SUMS.sigstore.json` (and `SHA256SUMS.asc` with GPG); attached to the GitHub release |
 
 ### Release ordering
 
@@ -96,6 +99,33 @@ publish charts (`needs` the images) → `stage-release-semantic`. A chart must n
 published for an image that doesn't exist, and a tag must never name a build that
 failed. A re-run after a failure produces the same version and overwrites the earlier
 partial artifacts.
+
+### Signing: bring your own, never stored here
+
+Signing keys and certificates are **never** in this repo, its examples, or its own
+secrets. Consumers pass theirs in as optional `secrets:` (or through a protected GitHub
+environment). Each kind of signing turns on only when its secrets or inputs are present.
+Nothing is signed when `publish` is false, so PR builds, including same-repo PRs that
+can see secrets, never touch a key.
+
+- **Keyless by default:** Sigstore over `SHA256SUMS`, GitHub build-provenance
+  attestations, and cosign for images. They need no secrets, only `id-token: write`.
+- **Executables** (`stage-package`, all on Linux, so cross-compiled builds can be signed):
+  - Windows Authenticode with jsign: `pkcs12` (your .pfx), `trusted-signing` or
+    `key-vault` (Azure, through OIDC so there's no stored credential)
+  - macOS with rcodesign: a Developer ID .p12, plus notarization if an App Store
+    Connect API key is passed
+  - GPG over `SHA256SUMS`
+- **Handling:** secrets reach steps only through `env:`. Key material is written under
+  `$RUNNER_TEMP` with `umask 077` and deleted in the same step. Passwords and tokens are
+  passed to tools as `env:`/file references, never on a command line. Fetched tokens are
+  masked with `::add-mask::`.
+- **Approval gates:** a stage that signs takes an `environment` input. Environment
+  secrets only reach a job that names the environment, so that path needs the caller to
+  use `secrets: inherit`. That's the one exception to "declare secrets explicitly", and
+  the reason it's allowed.
+- **New providers** (AWS or Google KMS, PKCS#11) go into jsign's provider `case` in
+  `stage-package`, not into a new stage.
 
 ## Writing a stage
 
