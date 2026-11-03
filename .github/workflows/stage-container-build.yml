@@ -139,7 +139,8 @@ jobs:
             echo "platforms=$PLATFORMS"
             echo "multi=$([ "$PLATFORMS" != linux/amd64 ] && echo true || echo false)"
             echo "has-key=$HAS_KEY"
-            echo "cache-scope=$(tr -c '[:alnum:]-' '-' <<< "${NAME:-default}")"
+            # printf, not <<<: tr -c would turn a here-string's newline into a trailing '-'.
+            echo "cache-scope=$(printf '%s' "${NAME:-default}" | tr -c '[:alnum:]-' '-')"
             echo "build-args<<__ARGS__"
             echo "VERSION=$version"
             echo "COMMIT=$GITHUB_SHA"
