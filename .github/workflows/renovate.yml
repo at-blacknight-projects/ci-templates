@@ -105,7 +105,7 @@ jobs:
             echo "Repositories: $repos"
           fi
 
-      - uses: renovatebot/github-action@v46.3.12  # no moving major tag upstream
+      - uses: renovatebot/github-action@v46.3.14  # no moving major tag upstream
         with:
           token: ${{ steps.app-token.outputs.token }}
           renovate-version: ${{ inputs.renovate-version }}
