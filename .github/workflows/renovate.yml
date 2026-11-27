@@ -51,7 +51,7 @@ on:
         description: Renovate version to run.
         type: string
         # renovate: datasource=docker depName=ghcr.io/renovatebot/renovate
-        default: 44.206.2
+        default: 44.264.1
     secrets:
       app-id:
         description: GitHub App ID Renovate runs as.
